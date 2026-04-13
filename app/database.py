@@ -79,3 +79,7 @@ def get_expenses_for_period(user_id: str, start_date: date, end_date: date) -> l
 def get_all_users() -> list[dict]:
     result = supabase.table("users").select("*").execute()
     return result.data
+
+
+def clear_all_expenses(user_id: str):
+    supabase.table("expenses").delete().eq("user_id", user_id).execute()

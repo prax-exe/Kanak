@@ -9,7 +9,7 @@ from collections import defaultdict
 from .database import (
     get_or_create_user, log_expenses, get_last_expense,
     update_expense, delete_expense, get_expenses_for_period,
-    set_default_currency
+    set_default_currency, clear_all_expenses
 )
 from .parser import parse_expenses
 from .reports import generate_pdf_report, generate_csv_report, format_amount
@@ -214,6 +214,12 @@ async def handle_message(phone_number: str, message_text: str):
                 f"Deleted: {format_amount(last['amount'], last['currency'])} \u2014 {last['description']}")
         else:
             await send_text(phone_number, "No recent expense to delete.")
+        return
+
+    # --- Clear all expenses ---
+    if text_lower == "clear":
+        clear_all_expenses(user["id"])
+        await send_text(phone_number, "All your expense data has been wiped.")
         return
 
     # --- Edit last ---
