@@ -3,9 +3,6 @@ import datetime
 from calendar import monthrange
 from contextlib import asynccontextmanager
 
-from dotenv import load_dotenv
-load_dotenv()
-
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import PlainTextResponse
 

@@ -1,6 +1,5 @@
 import os
 import httpx
-from dotenv import load_dotenv
 from datetime import date, timedelta
 from calendar import monthrange
 from collections import defaultdict
@@ -11,8 +10,6 @@ from .database import (
 )
 from .parser import parse_expenses
 from .reports import generate_pdf_report, generate_csv_report, format_amount
-
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'), override=True)
 
 PHONE_NUMBER_ID = os.environ.get("WHATSAPP_PHONE_NUMBER_ID", "")
 ACCESS_TOKEN = os.environ.get("WHATSAPP_ACCESS_TOKEN", "")

@@ -1,11 +1,8 @@
 import os
-from dotenv import load_dotenv
 from supabase import create_client, Client
 from datetime import date
 from typing import Optional
 from .models import ParsedExpense
-
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'), override=True)
 
 supabase: Client = create_client(
     os.environ["SUPABASE_URL"],
