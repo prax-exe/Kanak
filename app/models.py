@@ -7,6 +7,7 @@ from enum import Enum
 class Currency(str, Enum):
     INR = "INR"
     USD = "USD"
+    EUR = "EUR"
 
 
 class Category(str, Enum):
@@ -27,6 +28,7 @@ class ParsedExpense(BaseModel):
     currency: str
     description: str
     category: str
+    inr_equivalent: Optional[float] = None
 
 
 class Expense(BaseModel):

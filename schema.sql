@@ -17,6 +17,7 @@ CREATE TABLE expenses (
     category TEXT NOT NULL,
     expense_date DATE NOT NULL DEFAULT CURRENT_DATE,
     raw_input TEXT,
+    inr_equivalent DECIMAL(12, 2),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

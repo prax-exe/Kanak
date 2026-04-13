@@ -12,7 +12,22 @@ from reportlab.lib.units import cm
 def format_amount(amount: float, currency: str) -> str:
     if currency == "INR":
         return f"\u20b9{amount:,.0f}"
-    return f"${amount:,.2f}"
+    if currency == "USD":
+        return f"${amount:,.2f}"
+    if currency == "EUR":
+        return f"\u20ac{amount:,.2f}"
+    return f"{currency} {amount:,.2f}"
+
+
+def format_amount_pdf(amount: float, currency: str) -> str:
+    """ASCII-safe version for PDF (Helvetica doesn't support ₹ or €)."""
+    if currency == "INR":
+        return f"Rs.{amount:,.0f}"
+    if currency == "USD":
+        return f"${amount:,.2f}"
+    if currency == "EUR":
+        return f"EUR {amount:,.2f}"
+    return f"{currency} {amount:,.2f}"
 
 
 def generate_pdf_report(expenses: list[dict], user: dict, month: date) -> bytes:
@@ -52,18 +67,21 @@ def generate_pdf_report(expenses: list[dict], user: dict, month: date) -> bytes:
     # Expenses table
     elements.append(Paragraph("All Expenses", section_style))
 
-    header = ["Date", "Description", "Category", "Amount"]
+    header = ["Date", "Description", "Category", "Amount", "INR Equiv."]
     rows = [header]
     for e in expenses:
         d = date.fromisoformat(e["expense_date"])
+        inr_eq = e.get("inr_equivalent")
+        inr_cell = format_amount_pdf(inr_eq, "INR") if inr_eq else "-"
         rows.append([
             d.strftime("%d %b"),
-            e["description"][:38],
+            e["description"][:34],
             e["category"],
-            format_amount(e["amount"], e["currency"])
+            format_amount_pdf(e["amount"], e["currency"]),
+            inr_cell
         ])
 
-    col_widths = [2.2 * cm, 9 * cm, 4 * cm, 2.8 * cm]
+    col_widths = [2.0 * cm, 7.5 * cm, 3.5 * cm, 2.8 * cm, 2.2 * cm]
     table = Table(rows, colWidths=col_widths)
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1a1a2e")),
@@ -89,7 +107,7 @@ def generate_pdf_report(expenses: list[dict], user: dict, month: date) -> bytes:
 
     summary_rows = [["Category", "Total"]]
     for category, currencies in sorted(by_category.items()):
-        parts = [format_amount(amt, cur) for cur, amt in currencies.items()]
+        parts = [format_amount_pdf(amt, cur) for cur, amt in currencies.items()]
         summary_rows.append([category, "  +  ".join(parts)])
 
     summary_table = Table(summary_rows, colWidths=[8 * cm, 5 * cm])
@@ -110,7 +128,7 @@ def generate_pdf_report(expenses: list[dict], user: dict, month: date) -> bytes:
     totals: dict[str, float] = defaultdict(float)
     for e in expenses:
         totals[e["currency"]] += e["amount"]
-    total_str = "  +  ".join(format_amount(amt, cur) for cur, amt in totals.items())
+    total_str = "  +  ".join(format_amount_pdf(amt, cur) for cur, amt in totals.items())
     elements.append(Paragraph(f"<b>Grand Total: {total_str}</b>", styles["Normal"]))
     elements.append(Spacer(1, 0.2 * cm))
     elements.append(Paragraph(

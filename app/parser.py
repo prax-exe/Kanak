@@ -1,11 +1,8 @@
 import os
 import json
 import re
-from dotenv import load_dotenv
 from groq import Groq
 from .models import ParsedExpense
-
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'), override=True)
 
 client = Groq(api_key=os.environ["GROQ_API_KEY"])
 
@@ -28,6 +25,7 @@ Category hints:
 Currency rules:
 - ₹, rs, inr, rupees, rupe, र → INR
 - $, usd, dollars, dollar → USD
+- €, eur, euros, euro → EUR
 - No symbol → use {default_currency}
 - Amount variants: 4k=4000, 1.5k=1500, 4,000=4000, 4.5k=4500
 
@@ -80,7 +78,7 @@ def parse_expenses(message: str, default_currency: str = "INR") -> list[ParsedEx
             if amount <= 0:
                 continue
             currency = str(item.get("currency", default_currency)).upper()
-            if currency not in ("INR", "USD"):
+            if currency not in ("INR", "USD", "EUR"):
                 currency = default_currency
             expenses.append(ParsedExpense(
                 amount=amount,

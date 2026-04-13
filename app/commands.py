@@ -23,32 +23,58 @@ WA_MEDIA_URL = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/media"
 # state values: "idle" | "awaiting_edit"
 user_sessions: dict[str, dict] = {}
 
-HELP_TEXT = """*WaEE \u2014 WhatsApp Expense Tracker*
+HELP_TEXT = """*Kanak \u2014 WhatsApp Expense Tracker*
 
-*Log expenses (just type naturally):*
-\u2022 `4000 bike repair`
-\u2022 `199 netflix, 800 groceries`
-\u2022 `$50 groceries, \u20b9500 petrol`
-\u2022 `4k rent`
+*Log expenses \u2014 just type naturally:*
+\u2022 `coffee 50` \u2192 Rs.50 under Food
+\u2022 `4000 bike repair` \u2192 Rs.4000 under Transport
+\u2022 `199 netflix, 800 groceries` \u2192 two expenses at once
+\u2022 `$15 spotify` \u2192 USD expense
+\u2022 `\u20ac10 museum ticket` \u2192 EUR expense (INR equivalent saved automatically)
+\u2022 `4k rent` \u2192 Rs.4000 (k = thousands)
+
+*Currency prefixes you can use:*
+\u2022 `\u20b9` / `rs` / `inr` / `rupees` \u2192 Indian Rupee
+\u2022 `$` / `usd` / `dollars` \u2192 US Dollar
+\u2022 `\u20ac` / `eur` / `euros` \u2192 Euro
 
 *View expenses:*
-\u2022 `today` \u2014 Today's expenses
-\u2022 `week` \u2014 This week summary
-\u2022 `month` \u2014 This month summary
+\u2022 `today` \u2014 today's expenses
+\u2022 `week` \u2014 this week summary
+\u2022 `month` \u2014 this month summary
 
 *Reports:*
 \u2022 `report` \u2014 PDF for this month
 \u2022 `report csv` \u2014 CSV for this month
-\u2022 `report last month` \u2014 Previous month PDF
+\u2022 `report last month` \u2014 previous month PDF
 
-*Corrections:*
-\u2022 `edit last` \u2014 Edit your last entry
-\u2022 `delete last` \u2014 Delete your last entry
+*Edit & delete:*
+\u2022 `edit last` \u2014 edit your last entry
+\u2022 `delete last` / `undo` \u2014 delete last entry
 
 *Settings:*
-\u2022 `currency INR` or `currency USD`
+\u2022 `currency INR` \u2014 set default to Rupees
+\u2022 `currency USD` \u2014 set default to Dollars
+\u2022 `currency EUR` \u2014 set default to Euros
 
-\u2022 `help` \u2014 Show this menu"""
+\u2022 `help` \u2014 show this menu"""
+
+
+async def fetch_inr_equivalent(amount: float, currency: str) -> float | None:
+    if currency == "INR":
+        return None
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"https://api.frankfurter.app/latest?from={currency}&to=INR",
+                timeout=5.0
+            )
+            if resp.status_code == 200:
+                rate = resp.json()["rates"]["INR"]
+                return round(amount * rate, 2)
+    except Exception:
+        pass
+    return None
 
 
 async def send_text(to: str, message: str):
@@ -165,15 +191,17 @@ async def handle_message(phone_number: str, message_text: str):
     # --- Currency setting ---
     if text_lower.startswith("currency "):
         cur = text_lower.split(" ", 1)[1].strip().upper()
-        if cur in ("INR", "USD"):
+        if cur in ("INR", "USD", "EUR"):
             set_default_currency(phone_number, cur)
             await send_text(phone_number, f"Default currency set to *{cur}*")
         else:
-            await send_text(phone_number, "Supported: `currency INR` or `currency USD`")
+            await send_text(phone_number, "Supported: `currency INR`, `currency USD`, or `currency EUR`")
         return
 
     # --- Help / Greetings ---
-    if text_lower in ("help", "hi", "hello", "/help", "/start"):
+    greetings = {"help", "hi", "hello", "/help", "/start", "hey", "helo",
+                 "vanakkam", "namaste", "namaskar", "yo", "sup", "start", "menu"}
+    if text_lower in greetings:
         await send_text(phone_number, HELP_TEXT)
         return
 
@@ -266,6 +294,9 @@ async def handle_message(phone_number: str, message_text: str):
             "Try: `4000 bike repair` or `199 netflix, 800 groceries`\n\n"
             "Type *help* to see all commands.")
         return
+
+    for expense in parsed:
+        expense.inr_equivalent = await fetch_inr_equivalent(expense.amount, expense.currency)
 
     log_expenses(user["id"], parsed, text)
 

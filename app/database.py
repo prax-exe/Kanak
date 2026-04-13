@@ -34,7 +34,8 @@ def log_expenses(user_id: str, expenses: list[ParsedExpense], raw_input: str) ->
             "description": e.description,
             "category": e.category,
             "expense_date": str(date.today()),
-            "raw_input": raw_input
+            "raw_input": raw_input,
+            **({"inr_equivalent": e.inr_equivalent} if e.inr_equivalent is not None else {})
         }
         for e in expenses
     ]
