@@ -1,6 +1,9 @@
 import os
 import httpx
+import logging
 from datetime import date, timedelta
+
+logger = logging.getLogger(__name__)
 from calendar import monthrange
 from collections import defaultdict
 from .database import (
@@ -50,7 +53,7 @@ HELP_TEXT = """*WaEE \u2014 WhatsApp Expense Tracker*
 
 async def send_text(to: str, message: str):
     async with httpx.AsyncClient() as client:
-        await client.post(
+        resp = await client.post(
             WA_API_URL,
             headers={"Authorization": f"Bearer {ACCESS_TOKEN}"},
             json={
@@ -61,6 +64,8 @@ async def send_text(to: str, message: str):
             },
             timeout=10.0
         )
+        if resp.status_code != 200:
+            logger.error("WhatsApp API error %s: %s", resp.status_code, resp.text)
 
 
 async def send_document(to: str, filename: str, data: bytes, caption: str, mime_type: str):
