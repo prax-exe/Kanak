@@ -274,7 +274,7 @@ async def handle_message(phone_number: str, message_text: str):
             csv_data = generate_csv_report(expenses)
             await send_document(
                 phone_number,
-                f"waee_{first_day.strftime('%Y_%m')}.csv",
+                f"kanak_{first_day.strftime('%Y_%m')}.csv",
                 csv_data,
                 f"Expenses \u2014 {month_label}",
                 "text/csv"
@@ -283,7 +283,7 @@ async def handle_message(phone_number: str, message_text: str):
             pdf_data = generate_pdf_report(expenses, user, first_day)
             await send_document(
                 phone_number,
-                f"waee_{first_day.strftime('%Y_%m')}.pdf",
+                f"kanak_{first_day.strftime('%Y_%m')}.pdf",
                 pdf_data,
                 f"Expenses \u2014 {month_label}",
                 "application/pdf"
@@ -318,6 +318,6 @@ async def handle_message(phone_number: str, message_text: str):
         reply += f"\n\n*{len(parsed)} expenses logged \u2014 {total_str}*"
 
     if is_first:
-        reply += "\n\n_Welcome to WaEE! Type *help* to see all commands._"
+        reply += "\n\n_Welcome to Kanak! Type *help* to see all commands._"
 
     await send_text(phone_number, reply)

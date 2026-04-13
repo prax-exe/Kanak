@@ -19,12 +19,12 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="WaEE", description="WhatsApp Expense Tracker", lifespan=lifespan)
+app = FastAPI(title="Kanak", description="WhatsApp Expense Tracker", lifespan=lifespan)
 
 
 @app.get("/")
 def root():
-    return {"status": "running", "app": "WaEE \u2014 WhatsApp Expense Tracker"}
+    return {"status": "running", "app": "Kanak \u2014 WhatsApp Expense Tracker"}
 
 
 # --- WhatsApp webhook verification (GET) ---
@@ -93,7 +93,7 @@ async def _send_monthly_reports():
         month_label = first_day.strftime("%B %Y")
         await send_document(
             user["phone_number"],
-            f"waee_{first_day.strftime('%Y_%m')}.pdf",
+            f"kanak_{first_day.strftime('%Y_%m')}.pdf",
             pdf_data,
             f"Your expense report for {month_label} \ud83d\udcca",
             "application/pdf"
