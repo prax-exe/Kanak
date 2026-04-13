@@ -66,7 +66,7 @@ async def fetch_inr_equivalent(amount: float, currency: str) -> float | None:
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"https://api.frankfurter.app/latest?from={currency}&to=INR",
+                f"https://api.frankfurter.dev/v1/latest?from={currency}&to=INR",
                 timeout=5.0
             )
             if resp.status_code == 200:
