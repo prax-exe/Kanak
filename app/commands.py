@@ -1,0 +1,284 @@
+import os
+import httpx
+from dotenv import load_dotenv
+from datetime import date, timedelta
+from calendar import monthrange
+from collections import defaultdict
+from .database import (
+    get_or_create_user, log_expenses, get_last_expense,
+    update_expense, delete_expense, get_expenses_for_period,
+    set_default_currency
+)
+from .parser import parse_expenses
+from .reports import generate_pdf_report, generate_csv_report, format_amount
+
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'), override=True)
+
+PHONE_NUMBER_ID = os.environ.get("WHATSAPP_PHONE_NUMBER_ID", "")
+ACCESS_TOKEN = os.environ.get("WHATSAPP_ACCESS_TOKEN", "")
+WA_API_URL = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/messages"
+WA_MEDIA_URL = f"https://graph.facebook.com/v19.0/{PHONE_NUMBER_ID}/media"
+
+# In-memory session state — acceptable for single-instance deployment
+# state values: "idle" | "awaiting_edit"
+user_sessions: dict[str, dict] = {}
+
+HELP_TEXT = """*WaEE \u2014 WhatsApp Expense Tracker*
+
+*Log expenses (just type naturally):*
+\u2022 `4000 bike repair`
+\u2022 `199 netflix, 800 groceries`
+\u2022 `$50 groceries, \u20b9500 petrol`
+\u2022 `4k rent`
+
+*View expenses:*
+\u2022 `today` \u2014 Today's expenses
+\u2022 `week` \u2014 This week summary
+\u2022 `month` \u2014 This month summary
+
+*Reports:*
+\u2022 `report` \u2014 PDF for this month
+\u2022 `report csv` \u2014 CSV for this month
+\u2022 `report last month` \u2014 Previous month PDF
+
+*Corrections:*
+\u2022 `edit last` \u2014 Edit your last entry
+\u2022 `delete last` \u2014 Delete your last entry
+
+*Settings:*
+\u2022 `currency INR` or `currency USD`
+
+\u2022 `help` \u2014 Show this menu"""
+
+
+async def send_text(to: str, message: str):
+    async with httpx.AsyncClient() as client:
+        await client.post(
+            WA_API_URL,
+            headers={"Authorization": f"Bearer {ACCESS_TOKEN}"},
+            json={
+                "messaging_product": "whatsapp",
+                "to": to,
+                "type": "text",
+                "text": {"body": message, "preview_url": False}
+            },
+            timeout=10.0
+        )
+
+
+async def send_document(to: str, filename: str, data: bytes, caption: str, mime_type: str):
+    async with httpx.AsyncClient() as client:
+        upload = await client.post(
+            WA_MEDIA_URL,
+            headers={"Authorization": f"Bearer {ACCESS_TOKEN}"},
+            files={"file": (filename, data, mime_type)},
+            data={"messaging_product": "whatsapp"},
+            timeout=30.0
+        )
+        upload.raise_for_status()
+        media_id = upload.json()["id"]
+
+        await client.post(
+            WA_API_URL,
+            headers={"Authorization": f"Bearer {ACCESS_TOKEN}"},
+            json={
+                "messaging_product": "whatsapp",
+                "to": to,
+                "type": "document",
+                "document": {
+                    "id": media_id,
+                    "caption": caption,
+                    "filename": filename
+                }
+            },
+            timeout=10.0
+        )
+
+
+def _format_expense_list(expenses: list[dict]) -> str:
+    if not expenses:
+        return "No expenses found."
+    lines = []
+    for e in expenses:
+        d = date.fromisoformat(e["expense_date"])
+        lines.append(
+            f"\u2022 {d.strftime('%d %b')}  {format_amount(e['amount'], e['currency'])}  \u2014  {e['description']}  _{e['category']}_"
+        )
+    return "\n".join(lines)
+
+
+def _format_summary(expenses: list[dict], label: str) -> str:
+    if not expenses:
+        return f"No expenses for {label}."
+
+    by_category: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    for e in expenses:
+        by_category[e["category"]][e["currency"]] += e["amount"]
+
+    totals: dict[str, float] = defaultdict(float)
+    for e in expenses:
+        totals[e["currency"]] += e["amount"]
+
+    lines = [f"*{label}*\n"]
+    for cat, currencies in sorted(by_category.items()):
+        parts = [format_amount(amt, cur) for cur, amt in currencies.items()]
+        lines.append(f"\u2022 {cat}: {' + '.join(parts)}")
+
+    total_str = " + ".join(format_amount(amt, cur) for cur, amt in totals.items())
+    lines.append(f"\n*Total: {total_str}*")
+    lines.append(f"_{len(expenses)} transaction{'s' if len(expenses) != 1 else ''}_")
+    return "\n".join(lines)
+
+
+async def handle_message(phone_number: str, message_text: str):
+    text = message_text.strip()
+    text_lower = text.lower()
+
+    user = get_or_create_user(phone_number)
+    session = user_sessions.get(phone_number, {"state": "idle"})
+
+    # --- Awaiting edit confirmation ---
+    if session.get("state") == "awaiting_edit":
+        expense_id = session.get("expense_id")
+        if expense_id:
+            parsed = parse_expenses(text, user["default_currency"])
+            if parsed:
+                e = parsed[0]
+                update_expense(expense_id, {
+                    "amount": e.amount,
+                    "currency": e.currency,
+                    "description": e.description,
+                    "category": e.category
+                })
+                user_sessions.pop(phone_number, None)
+                await send_text(phone_number,
+                    f"\u2713 Updated: {format_amount(e.amount, e.currency)} \u2014 {e.description} ({e.category})")
+            else:
+                await send_text(phone_number, "Couldn't parse that. Try: `3500 bike repair`\n\nSend `cancel` to abort.")
+                if text_lower == "cancel":
+                    user_sessions.pop(phone_number, None)
+                    await send_text(phone_number, "Edit cancelled.")
+        return
+
+    # --- Currency setting ---
+    if text_lower.startswith("currency "):
+        cur = text_lower.split(" ", 1)[1].strip().upper()
+        if cur in ("INR", "USD"):
+            set_default_currency(phone_number, cur)
+            await send_text(phone_number, f"Default currency set to *{cur}*")
+        else:
+            await send_text(phone_number, "Supported: `currency INR` or `currency USD`")
+        return
+
+    # --- Help / Greetings ---
+    if text_lower in ("help", "hi", "hello", "/help", "/start"):
+        await send_text(phone_number, HELP_TEXT)
+        return
+
+    # --- Delete last ---
+    if text_lower in ("delete last", "undo"):
+        last = get_last_expense(user["id"])
+        if last:
+            delete_expense(last["id"])
+            await send_text(phone_number,
+                f"Deleted: {format_amount(last['amount'], last['currency'])} \u2014 {last['description']}")
+        else:
+            await send_text(phone_number, "No recent expense to delete.")
+        return
+
+    # --- Edit last ---
+    if text_lower == "edit last":
+        last = get_last_expense(user["id"])
+        if last:
+            user_sessions[phone_number] = {"state": "awaiting_edit", "expense_id": last["id"]}
+            await send_text(phone_number,
+                f"Last entry: *{format_amount(last['amount'], last['currency'])}* \u2014 {last['description']} ({last['category']})\n\n"
+                f"Send the corrected entry (or `cancel`):")
+        else:
+            await send_text(phone_number, "No recent expense to edit.")
+        return
+
+    # --- Date queries ---
+    today = date.today()
+
+    if text_lower == "today":
+        expenses = get_expenses_for_period(user["id"], today, today)
+        total = sum(e["amount"] for e in expenses if e["currency"] == user["default_currency"])
+        reply = _format_expense_list(expenses)
+        if expenses:
+            reply += f"\n\n*{len(expenses)} expense{'s' if len(expenses)!=1 else ''} today*"
+        await send_text(phone_number, reply)
+        return
+
+    if text_lower in ("week", "this week"):
+        start = today - timedelta(days=today.weekday())
+        expenses = get_expenses_for_period(user["id"], start, today)
+        await send_text(phone_number, _format_summary(expenses, "This Week"))
+        return
+
+    if text_lower in ("month", "this month", "summary"):
+        start = today.replace(day=1)
+        expenses = get_expenses_for_period(user["id"], start, today)
+        await send_text(phone_number, _format_summary(expenses, today.strftime("%B %Y")))
+        return
+
+    # --- Reports ---
+    if text_lower.startswith("report"):
+        is_last_month = "last month" in text_lower
+        if is_last_month:
+            first_day = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
+        else:
+            first_day = today.replace(day=1)
+
+        last_day = first_day.replace(day=monthrange(first_day.year, first_day.month)[1])
+        expenses = get_expenses_for_period(user["id"], first_day, last_day)
+        month_label = first_day.strftime("%B %Y")
+
+        if "csv" in text_lower:
+            csv_data = generate_csv_report(expenses)
+            await send_document(
+                phone_number,
+                f"waee_{first_day.strftime('%Y_%m')}.csv",
+                csv_data,
+                f"Expenses \u2014 {month_label}",
+                "text/csv"
+            )
+        else:
+            pdf_data = generate_pdf_report(expenses, user, first_day)
+            await send_document(
+                phone_number,
+                f"waee_{first_day.strftime('%Y_%m')}.pdf",
+                pdf_data,
+                f"Expenses \u2014 {month_label}",
+                "application/pdf"
+            )
+        return
+
+    # --- Default: parse as expense ---
+    is_first = get_last_expense(user["id"]) is None
+    parsed = parse_expenses(text, user["default_currency"])
+
+    if not parsed:
+        await send_text(phone_number,
+            "Couldn't read that as an expense.\n\n"
+            "Try: `4000 bike repair` or `199 netflix, 800 groceries`\n\n"
+            "Type *help* to see all commands.")
+        return
+
+    log_expenses(user["id"], parsed, text)
+
+    # Build confirmation
+    lines = [f"\u2713 {format_amount(e.amount, e.currency)} \u2014 {e.description} _{e.category}_" for e in parsed]
+    reply = "\n".join(lines)
+
+    if len(parsed) > 1:
+        totals: dict[str, float] = defaultdict(float)
+        for e in parsed:
+            totals[e.currency] += e.amount
+        total_str = " + ".join(format_amount(amt, cur) for cur, amt in totals.items())
+        reply += f"\n\n*{len(parsed)} expenses logged \u2014 {total_str}*"
+
+    if is_first:
+        reply += "\n\n_Welcome to WaEE! Type *help* to see all commands._"
+
+    await send_text(phone_number, reply)
