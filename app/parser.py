@@ -26,15 +26,24 @@ Currency rules:
 - ₹, rs, inr, rupees, rupe, र → INR
 - $, usd, dollars, dollar → USD
 - €, eur, euros, euro → EUR
-- No symbol → use {default_currency}
-- Amount variants: 4k=4000, 1.5k=1500, 4,000=4000, 4.5k=4500
+- CRITICAL: If NO currency symbol is present, you MUST use "{default_currency}" — never default to INR unless {default_currency} is INR.
+
+Amount rules:
+- CRITICAL: Parse amounts EXACTLY as written. "4" means 4.0, NOT 4000. "200" means 200.0, NOT 2000.
+- Only the "k" suffix means thousands: 4k=4000, 1.5k=1500, 4.5k=4500
+- Commas are thousand separators: 4,000=4000
+- Never guess or inflate amounts.
 
 Return ONLY a valid JSON array, no explanation, no markdown:
-[{{"amount": 4000.0, "currency": "INR", "description": "Bike repair", "category": "Transport"}}]
+[{{"amount": 4000.0, "currency": "{default_currency}", "description": "Bike repair", "category": "Transport"}}]
 
-Multiple expenses example:
+Example — default currency is {default_currency}:
 Input: "4000 bike repair, 199 netflix, $15 spotify"
-Output: [{{"amount": 4000.0, "currency": "INR", "description": "Bike repair", "category": "Transport"}}, {{"amount": 199.0, "currency": "INR", "description": "Netflix", "category": "Entertainment"}}, {{"amount": 15.0, "currency": "USD", "description": "Spotify", "category": "Entertainment"}}]
+Output: [{{"amount": 4000.0, "currency": "{default_currency}", "description": "Bike repair", "category": "Transport"}}, {{"amount": 199.0, "currency": "{default_currency}", "description": "Netflix", "category": "Entertainment"}}, {{"amount": 15.0, "currency": "USD", "description": "Spotify", "category": "Entertainment"}}]
+
+Example — exact small amounts:
+Input: "pizza 4, coffee 3.5"
+Output: [{{"amount": 4.0, "currency": "{default_currency}", "description": "Pizza", "category": "Food"}}, {{"amount": 3.5, "currency": "{default_currency}", "description": "Coffee", "category": "Food"}}]
 
 If no valid expense found, return: []"""
 
