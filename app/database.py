@@ -83,3 +83,23 @@ def get_all_users() -> list[dict]:
 
 def clear_all_expenses(user_id: str):
     supabase.table("expenses").delete().eq("user_id", user_id).execute()
+
+
+def set_notify_time(phone_number: str, hhmm: str):
+    """Store HH:MM (IST, 24h) notify time for a user."""
+    supabase.table("users").update({"notify_time": hhmm}).eq("phone_number", phone_number).execute()
+
+
+def clear_notify_time(phone_number: str):
+    supabase.table("users").update({"notify_time": None}).eq("phone_number", phone_number).execute()
+
+
+def get_users_to_notify(hhmm: str) -> list[dict]:
+    """Return users whose notify_time matches HH:MM."""
+    result = (
+        supabase.table("users")
+        .select("phone_number, display_name")
+        .eq("notify_time", hhmm)
+        .execute()
+    )
+    return result.data

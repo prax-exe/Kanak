@@ -1,22 +1,47 @@
 import os
+import asyncio
 import datetime
 from calendar import monthrange
 from contextlib import asynccontextmanager
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import PlainTextResponse
 
-from .commands import handle_message, send_document
-from .database import get_all_users, get_expenses_for_period
+from .commands import handle_message, send_document, send_text
+from .database import get_all_users, get_expenses_for_period, get_users_to_notify
 from .reports import generate_pdf_report
 
 VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "")
 SCHEDULER_SECRET = os.environ.get("SCHEDULER_SECRET", "")
+IST = ZoneInfo("Asia/Kolkata")
+
+REMINDER_TEXT = (
+    "Hey! Time to log your expenses for today.\n\n"
+    "Just type what you spent — e.g. `200 lunch, 50 chai`"
+)
+
+
+async def _notify_scheduler():
+    """Runs every minute. Sends reminders to users whose notify_time matches current IST time."""
+    while True:
+        try:
+            now_ist = datetime.datetime.now(IST)
+            hhmm = now_ist.strftime("%H:%M")
+            users = get_users_to_notify(hhmm)
+            for user in users:
+                await send_text(user["phone_number"], REMINDER_TEXT)
+        except Exception:
+            pass
+        # Sleep until the start of the next minute
+        await asyncio.sleep(60 - datetime.datetime.now(IST).second)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    task = asyncio.create_task(_notify_scheduler())
     yield
+    task.cancel()
 
 
 app = FastAPI(title="Kanak", description="WhatsApp Expense Tracker", lifespan=lifespan)

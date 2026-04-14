@@ -65,7 +65,7 @@ def parse_expenses(message: str, default_currency: str = "INR") -> list[ParsedEx
             {"role": "user", "content": message}
         ],
         temperature=0.1,
-        max_tokens=512
+        max_tokens=256
     )
 
     raw = response.choices[0].message.content.strip()

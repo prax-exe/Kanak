@@ -5,6 +5,7 @@ CREATE TABLE users (
     phone_number TEXT UNIQUE NOT NULL,
     display_name TEXT,
     default_currency TEXT NOT NULL DEFAULT 'INR',
+    notify_time TEXT,                              -- HH:MM IST (24h), NULL = disabled
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
