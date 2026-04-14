@@ -12,7 +12,7 @@ from .database import (
     get_or_create_user, log_expenses, get_last_expense,
     update_expense, delete_expense, get_expenses_for_period,
     set_default_currency, clear_all_expenses,
-    set_notify_time, clear_notify_time
+    set_notify_time, clear_notify_time, delete_user
 )
 from .parser import parse_expenses
 from .reports import generate_pdf_report, generate_csv_report, format_amount
@@ -252,6 +252,17 @@ async def handle_message(phone_number: str, message_text: str, from_voice: bool 
                     await send_text(phone_number, "Edit cancelled.")
         return
 
+    # --- Awaiting delete account confirmation ---
+    if session.get("state") == "awaiting_delete_confirm":
+        if text == "CONFIRM DELETE":
+            delete_user(phone_number)
+            user_sessions.pop(phone_number, None)
+            await send_text(phone_number, "Your account and all expense data have been permanently deleted.")
+        else:
+            user_sessions.pop(phone_number, None)
+            await send_text(phone_number, "Cancelled. Your account is safe.")
+        return
+
     # --- Currency setting ---
     if text_lower.startswith("currency "):
         cur = text_lower.split(" ", 1)[1].strip().upper()
@@ -305,6 +316,16 @@ async def handle_message(phone_number: str, message_text: str, from_voice: bool 
     if text_lower == "clear":
         clear_all_expenses(user["id"])
         await send_text(phone_number, "All your expense data has been wiped.")
+        return
+
+    # --- Delete account ---
+    if text_lower in ("delete my account", "delete account"):
+        user_sessions[phone_number] = {"state": "awaiting_delete_confirm"}
+        await send_text(
+            phone_number,
+            "This will *permanently delete* your account and all expense data. This cannot be undone.\n\n"
+            "Type *CONFIRM DELETE* to proceed, or anything else to cancel."
+        )
         return
 
     # --- Edit last ---

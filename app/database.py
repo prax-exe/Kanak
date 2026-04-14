@@ -85,6 +85,11 @@ def clear_all_expenses(user_id: str):
     supabase.table("expenses").delete().eq("user_id", user_id).execute()
 
 
+def delete_user(phone_number: str):
+    """Permanently delete user and all their expenses (CASCADE handles expenses)."""
+    supabase.table("users").delete().eq("phone_number", phone_number).execute()
+
+
 def set_notify_time(phone_number: str, hhmm: str):
     """Store HH:MM (IST, 24h) notify time for a user."""
     supabase.table("users").update({"notify_time": hhmm}).eq("phone_number", phone_number).execute()

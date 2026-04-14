@@ -1,4 +1,7 @@
 import os
+import hmac
+import json
+import hashlib
 import asyncio
 import datetime
 from calendar import monthrange
@@ -14,6 +17,17 @@ from .reports import generate_pdf_report
 
 VERIFY_TOKEN = os.environ.get("WHATSAPP_VERIFY_TOKEN", "")
 SCHEDULER_SECRET = os.environ.get("SCHEDULER_SECRET", "")
+APP_SECRET = os.environ.get("WHATSAPP_APP_SECRET", "")
+
+
+def _verify_signature(body: bytes, signature_header: str) -> bool:
+    """Validate X-Hub-Signature-256 from Meta to reject spoofed webhook calls."""
+    if not APP_SECRET:
+        return True  # not configured — skip (warn in logs)
+    if not signature_header.startswith("sha256="):
+        return False
+    expected = hmac.new(APP_SECRET.encode(), body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature_header[7:])
 IST = ZoneInfo("Asia/Kolkata")
 
 REMINDER_TEXT = (
@@ -64,7 +78,12 @@ def verify_webhook(request: Request):
 # --- Incoming WhatsApp messages (POST) ---
 @app.post("/webhook")
 async def receive_message(request: Request, background_tasks: BackgroundTasks):
-    body = await request.json()
+    body_bytes = await request.body()
+    sig = request.headers.get("X-Hub-Signature-256", "")
+    if not _verify_signature(body_bytes, sig):
+        raise HTTPException(status_code=403, detail="Invalid signature")
+
+    body = json.loads(body_bytes)
 
     try:
         change_value = body["entry"][0]["changes"][0]["value"]
