@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "WebFetch(domain:kanak-production.up.railway.app)"
+      "WebFetch(domain:kanak-production.up.railway.app)",
+      "WebFetch(domain:api.frankfurter.app)"
     ]
   }
 }

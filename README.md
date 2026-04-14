@@ -185,3 +185,12 @@ The default Meta access token expires every 24 hours. To generate one that never
 4. Click **Generate New Token** → select your app → enable `whatsapp_business_messaging` → set expiry to **Never**
 
 ---
+
+## License
+
+MIT
+
+
+## License
+
+MIT

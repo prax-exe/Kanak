@@ -27,12 +27,22 @@ async def download_audio(media_id: str) -> bytes | None:
         return audio.content
 
 
+_WHISPER_PROMPT = (
+    "Expense amounts in rupees, dollars, euros. "
+    "Common words: petrol, groceries, rent, salary, recharge, chai, lunch, dinner, "
+    "swiggy, zomato, netflix, spotify, amazon, flipkart, uber, ola, metro, "
+    "medicine, gym, electricity, wifi, broadband, haircut, tuition. "
+    "Numbers may be spoken: two hundred, fifty, four thousand, one point five k."
+)
+
+
 async def transcribe(audio_bytes: bytes) -> str | None:
     """Transcribe audio bytes using Groq Whisper. Returns plain text or None."""
     try:
         result = await _groq.audio.transcriptions.create(
             file=("voice.ogg", audio_bytes),
             model="whisper-large-v3-turbo",
+            prompt=_WHISPER_PROMPT,
         )
         return result.text.strip() or None
     except Exception:

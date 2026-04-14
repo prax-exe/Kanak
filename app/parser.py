@@ -45,7 +45,9 @@ Example — exact small amounts:
 Input: "pizza 4, coffee 3.5"
 Output: [{{"amount": 4.0, "currency": "{default_currency}", "description": "Pizza", "category": "Food"}}, {{"amount": 3.5, "currency": "{default_currency}", "description": "Coffee", "category": "Food"}}]
 
-If no valid expense found, return: []"""
+If no valid expense found, return: []
+
+{voice_note}"""
 
 
 def _normalize_amount(raw: str) -> float:
@@ -55,26 +57,23 @@ def _normalize_amount(raw: str) -> float:
     return float(raw)
 
 
-def parse_expenses(message: str, default_currency: str = "INR") -> list[ParsedExpense]:
+_VOICE_NOTE = (
+    "NOTE: This input came from speech-to-text. Numbers may be spelled out — "
+    "convert them: 'two hundred'=200, 'fifty'=50, 'four thousand'=4000, "
+    "'one k'=1000, 'four k'=4000, 'one point five k'=1500."
+)
+
+
+def _build_prompt(default_currency: str, from_voice: bool) -> str:
     prompt = SYSTEM_PROMPT.replace("{default_currency}", default_currency)
+    prompt = prompt.replace("{voice_note}", _VOICE_NOTE if from_voice else "")
+    return prompt
 
-    response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": message}
-        ],
-        temperature=0.1,
-        max_tokens=256
-    )
 
-    raw = response.choices[0].message.content.strip()
-
-    # Extract JSON array — handle cases where model adds extra text
+def _extract_expenses(raw: str, default_currency: str) -> list[ParsedExpense]:
     match = re.search(r'\[.*?\]', raw, re.DOTALL)
     if not match:
         return []
-
     try:
         data = json.loads(match.group())
     except json.JSONDecodeError:
@@ -97,5 +96,33 @@ def parse_expenses(message: str, default_currency: str = "INR") -> list[ParsedEx
             ))
         except (KeyError, ValueError, TypeError):
             continue
+    return expenses
+
+
+def parse_expenses(message: str, default_currency: str = "INR", from_voice: bool = False) -> list[ParsedExpense]:
+    prompt = _build_prompt(default_currency, from_voice)
+    messages = [
+        {"role": "system", "content": prompt},
+        {"role": "user", "content": message}
+    ]
+
+    # Fast path: 8B model
+    response = client.chat.completions.create(
+        model="llama-3.1-8b-instant",
+        messages=messages,
+        temperature=0.1,
+        max_tokens=256
+    )
+    expenses = _extract_expenses(response.choices[0].message.content.strip(), default_currency)
+
+    # Fallback: 70B model if 8B returned nothing
+    if not expenses:
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=messages,
+            temperature=0.1,
+            max_tokens=256
+        )
+        expenses = _extract_expenses(response.choices[0].message.content.strip(), default_currency)
 
     return expenses

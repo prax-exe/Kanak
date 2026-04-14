@@ -199,7 +199,7 @@ async def handle_voice_message(phone_number: str, media_id: str):
         return
 
     await send_text(phone_number, f"_Heard: {transcript}_")
-    await handle_message(phone_number, transcript)
+    await handle_message(phone_number, transcript, from_voice=True)
 
 
 def _parse_time_input(raw: str) -> str | None:
@@ -222,7 +222,7 @@ def _parse_time_input(raw: str) -> str | None:
     return f"{hour:02d}:{minute:02d}"
 
 
-async def handle_message(phone_number: str, message_text: str):
+async def handle_message(phone_number: str, message_text: str, from_voice: bool = False):
     text = message_text.strip()
     text_lower = text.lower()
 
@@ -377,7 +377,7 @@ async def handle_message(phone_number: str, message_text: str):
 
     # --- Default: parse as expense ---
     is_first = get_last_expense(user["id"]) is None
-    parsed = parse_expenses(text, user["default_currency"])
+    parsed = parse_expenses(text, user["default_currency"], from_voice=from_voice)
 
     if not parsed:
         await send_text(phone_number,
