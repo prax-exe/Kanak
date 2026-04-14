@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import PlainTextResponse
 
-from .commands import handle_message, send_document, send_text
+from .commands import handle_message, handle_voice_message, send_document, send_text
 from .database import get_all_users, get_expenses_for_period, get_users_to_notify
 from .reports import generate_pdf_report
 
@@ -75,14 +75,15 @@ async def receive_message(request: Request, background_tasks: BackgroundTasks):
 
         message = change_value["messages"][0]
 
-        # Only handle text messages
-        if message.get("type") != "text":
-            return {"status": "ok"}
-
         phone_number = message["from"]
-        text = message["text"]["body"]
+        msg_type = message.get("type")
 
-        background_tasks.add_task(handle_message, phone_number, text)
+        if msg_type == "text":
+            text = message["text"]["body"]
+            background_tasks.add_task(handle_message, phone_number, text)
+        elif msg_type == "audio":
+            media_id = message["audio"]["id"]
+            background_tasks.add_task(handle_voice_message, phone_number, media_id)
 
     except (KeyError, IndexError):
         # Malformed payload — ignore silently

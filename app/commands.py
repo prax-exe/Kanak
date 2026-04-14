@@ -185,6 +185,23 @@ def _format_summary(expenses: list[dict], label: str) -> str:
     return "\n".join(lines)
 
 
+async def handle_voice_message(phone_number: str, media_id: str):
+    from .voice import download_audio, transcribe
+
+    audio_bytes = await download_audio(media_id)
+    if not audio_bytes:
+        await send_text(phone_number, "Couldn't download your voice note. Please try again.")
+        return
+
+    transcript = await transcribe(audio_bytes)
+    if not transcript:
+        await send_text(phone_number, "Couldn't understand that voice note. Try speaking clearly or just type it.")
+        return
+
+    await send_text(phone_number, f"_Heard: {transcript}_")
+    await handle_message(phone_number, transcript)
+
+
 def _parse_time_input(raw: str) -> str | None:
     """Parse user time input into HH:MM (24h) string, or None if unparseable."""
     import re
