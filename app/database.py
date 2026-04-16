@@ -120,21 +120,35 @@ def clear_budget(phone_number: str):
     supabase.table("users").update({"monthly_budget": None}).eq("phone_number", phone_number).execute()
 
 
-def set_notify_time(phone_number: str, hhmm: str):
-    """Store HH:MM (IST, 24h) notify time for a user."""
-    supabase.table("users").update({"notify_time": hhmm}).eq("phone_number", phone_number).execute()
+def set_notify_time(phone_number: str, hhmm: str, timezone: str = "Asia/Kolkata"):
+    """Store HH:MM notify time and IANA timezone for a user."""
+    supabase.table("users").update({
+        "notify_time": hhmm,
+        "notify_timezone": timezone,
+    }).eq("phone_number", phone_number).execute()
+
+
+def set_user_timezone(phone_number: str, timezone: str):
+    supabase.table("users").update({"notify_timezone": timezone}).eq("phone_number", phone_number).execute()
 
 
 def clear_notify_time(phone_number: str):
     supabase.table("users").update({"notify_time": None}).eq("phone_number", phone_number).execute()
 
 
-def get_users_to_notify(hhmm: str) -> list[dict]:
-    """Return users whose notify_time matches HH:MM."""
+def get_users_to_notify() -> list[dict]:
+    """Return all users who have a notify_time set (timezone check happens in Python)."""
     result = (
         supabase.table("users")
-        .select("phone_number, display_name")
-        .eq("notify_time", hhmm)
+        .select("phone_number, notify_time, notify_timezone")
         .execute()
     )
-    return result.data
+    return [u for u in result.data if u.get("notify_time")]
+
+
+def set_user_session(phone_number: str, state: dict):
+    supabase.table("users").update({"session_state": state}).eq("phone_number", phone_number).execute()
+
+
+def clear_user_session(phone_number: str):
+    supabase.table("users").update({"session_state": None}).eq("phone_number", phone_number).execute()

@@ -12,8 +12,9 @@ from .database import (
     get_or_create_user, log_expenses, get_last_expense, get_last_batch_expenses,
     update_expense, delete_expense, get_expenses_for_period,
     set_default_currency, clear_all_expenses,
-    set_notify_time, clear_notify_time, delete_user,
+    set_notify_time, set_user_timezone, clear_notify_time, delete_user,
     set_budget, clear_budget,
+    set_user_session, clear_user_session,
 )
 from .parser import parse_expenses
 from .reports import generate_pdf_report, generate_excel_report, format_amount
@@ -36,9 +37,50 @@ def get_http_client() -> httpx.AsyncClient:
 _rate_cache: dict[str, tuple[float, float]] = {}
 _RATE_TTL = 1800  # 30 minutes
 
-# In-memory session state — acceptable for single-instance deployment
-# state values: "idle" | "awaiting_edit_select" | "awaiting_edit" | "awaiting_clear_confirm" | "awaiting_delete_confirm"
-user_sessions: dict[str, dict] = {}
+# Per-phone rate limiting: track message timestamps in a sliding window
+_rate_limits: dict[str, list[float]] = {}
+_RATE_WINDOW = 60   # seconds
+_RATE_MAX = 20      # messages per window
+
+def _check_rate_limit(phone_number: str) -> bool:
+    """Return True if this phone number has exceeded the rate limit."""
+    now = time.monotonic()
+    timestamps = [t for t in _rate_limits.get(phone_number, []) if now - t < _RATE_WINDOW]
+    _rate_limits[phone_number] = timestamps
+    if len(timestamps) >= _RATE_MAX:
+        return True
+    _rate_limits[phone_number].append(now)
+    return False
+
+# Common timezone aliases → IANA names
+TIMEZONE_ALIASES: dict[str, str] = {
+    "IST":  "Asia/Kolkata",
+    "EST":  "America/New_York",
+    "EDT":  "America/New_York",
+    "CST":  "America/Chicago",
+    "CDT":  "America/Chicago",
+    "MST":  "America/Denver",
+    "MDT":  "America/Denver",
+    "PST":  "America/Los_Angeles",
+    "PDT":  "America/Los_Angeles",
+    "GMT":  "UTC",
+    "UTC":  "UTC",
+    "BST":  "Europe/London",
+    "CET":  "Europe/Paris",
+    "CEST": "Europe/Paris",
+    "SGT":  "Asia/Singapore",
+    "JST":  "Asia/Tokyo",
+    "AEST": "Australia/Sydney",
+    "AEDT": "Australia/Sydney",
+    "WAT":  "Africa/Lagos",
+    "EAT":  "Africa/Nairobi",
+    "GST":  "Asia/Dubai",
+    "PKT":  "Asia/Karachi",
+    "BDT":  "Asia/Dhaka",
+    "NPT":  "Asia/Kathmandu",
+    "LKT":  "Asia/Colombo",
+}
+_TZ_REVERSE = {v: k for k, v in TIMEZONE_ALIASES.items()}
 
 HELP_TEXT = """*Kanak \u2014 WhatsApp Expense Tracker*
 
@@ -81,8 +123,10 @@ Kanak will transcribe and log them automatically.
 \u2022 `currency EUR` \u2014 set default to Euros
 \u2022 `budget 10000` \u2014 set monthly budget (alerts at 50%, 80%, 100%)
 \u2022 `budget off` \u2014 remove budget
-\u2022 `notify 9pm` \u2014 daily reminder at 9 PM IST
+\u2022 `notify 9pm` \u2014 daily reminder at 9 PM (your timezone)
+\u2022 `notify 9pm EST` \u2014 set time with timezone
 \u2022 `notify off` \u2014 turn off reminder
+\u2022 `timezone IST` \u2014 set your timezone (IST, EST, SGT\u2026)
 
 \u2022 `help` \u2014 show this menu"""
 
@@ -236,12 +280,20 @@ async def handle_voice_message(phone_number: str, media_id: str):
             logger.exception("Failed to send voice error message to %s", phone_number)
 
 
-def _parse_time_input(raw: str) -> str | None:
-    """Parse user time input into HH:MM (24h) string, or None if unparseable."""
+def _parse_notify_arg(arg: str, stored_tz: str) -> tuple[str, str] | None:
+    """Parse 'HH:MM [timezone]' → (hhmm, iana_tz) or None.
+
+    If no timezone is given, falls back to stored_tz.
+    Accepts common aliases (IST, EST…) and IANA names (Asia/Kolkata).
+    """
     import re
-    raw = raw.strip().lower().replace(".", ":").replace(" ", "")
-    # Formats: 9pm, 9:30pm, 21:00, 9am, 8:30am
-    m = re.match(r'^(\d{1,2})(?::(\d{2}))?(am|pm)?$', raw)
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    parts = arg.strip().split(None, 1)
+    time_raw = parts[0].lower().replace(".", ":")
+    tz_input = parts[1].strip() if len(parts) > 1 else None
+
+    m = re.match(r'^(\d{1,2})(?::(\d{2}))?(am|pm)?$', time_raw)
     if not m:
         return None
     hour = int(m.group(1))
@@ -253,7 +305,17 @@ def _parse_time_input(raw: str) -> str | None:
         hour = 0
     if not (0 <= hour <= 23 and 0 <= minute <= 59):
         return None
-    return f"{hour:02d}:{minute:02d}"
+    hhmm = f"{hour:02d}:{minute:02d}"
+
+    if tz_input is None:
+        return hhmm, stored_tz
+
+    iana = TIMEZONE_ALIASES.get(tz_input.upper(), tz_input)
+    try:
+        ZoneInfo(iana)
+        return hhmm, iana
+    except (ZoneInfoNotFoundError, KeyError):
+        return None
 
 
 async def handle_message(phone_number: str, message_text: str, from_voice: bool = False):
@@ -268,18 +330,22 @@ async def handle_message(phone_number: str, message_text: str, from_voice: bool 
 
 
 async def _handle_message(phone_number: str, message_text: str, from_voice: bool = False):
+    if _check_rate_limit(phone_number):
+        await send_text(phone_number, "You're sending messages too fast. Please wait a moment and try again.")
+        return
+
     text = message_text.strip()
     text_lower = text.lower()
 
     user = get_or_create_user(phone_number)
-    session = user_sessions.get(phone_number, {"state": "idle"})
+    session = user.get("session_state") or {"state": "idle"}
 
     # --- Awaiting edit confirmation ---
     if session.get("state") == "awaiting_edit":
         expense_id = session.get("expense_id")
         if expense_id:
             if text_lower == "cancel":
-                user_sessions.pop(phone_number, None)
+                clear_user_session(phone_number)
                 await send_text(phone_number, "Edit cancelled.")
                 return
             parsed = parse_expenses(text, user["default_currency"])
@@ -291,7 +357,7 @@ async def _handle_message(phone_number: str, message_text: str, from_voice: bool
                     "description": e.description,
                     "category": e.category
                 })
-                user_sessions.pop(phone_number, None)
+                clear_user_session(phone_number)
                 await send_text(phone_number,
                     f"\u2713 Updated: {format_amount(e.amount, e.currency)} \u2014 {e.description} ({e.category})")
             else:
@@ -303,14 +369,14 @@ async def _handle_message(phone_number: str, message_text: str, from_voice: bool
         expense_ids = session.get("expense_ids", [])
         expenses = session.get("expenses", [])
         if text_lower == "cancel":
-            user_sessions.pop(phone_number, None)
+            clear_user_session(phone_number)
             await send_text(phone_number, "Edit cancelled.")
             return
         try:
             idx = int(text.strip()) - 1
             if 0 <= idx < len(expense_ids):
                 e = expenses[idx]
-                user_sessions[phone_number] = {"state": "awaiting_edit", "expense_id": expense_ids[idx]}
+                set_user_session(phone_number, {"state": "awaiting_edit", "expense_id": expense_ids[idx]})
                 await send_text(
                     phone_number,
                     f"Editing: *{format_amount(e['amount'], e['currency'])}* \u2014 {e['description']} ({e['category']})\n\n"
@@ -332,10 +398,10 @@ async def _handle_message(phone_number: str, message_text: str, from_voice: bool
     if session.get("state") == "awaiting_clear_confirm":
         if text == "CONFIRM CLEAR":
             clear_all_expenses(user["id"])
-            user_sessions.pop(phone_number, None)
+            clear_user_session(phone_number)
             await send_text(phone_number, "All your expense data has been wiped.")
         else:
-            user_sessions.pop(phone_number, None)
+            clear_user_session(phone_number)
             await send_text(phone_number, "Cancelled. Your data is safe.")
         return
 
@@ -343,10 +409,9 @@ async def _handle_message(phone_number: str, message_text: str, from_voice: bool
     if session.get("state") == "awaiting_delete_confirm":
         if text == "CONFIRM DELETE":
             delete_user(phone_number)
-            user_sessions.pop(phone_number, None)
             await send_text(phone_number, "Your account and all expense data have been permanently deleted.")
         else:
-            user_sessions.pop(phone_number, None)
+            clear_user_session(phone_number)
             await send_text(phone_number, "Cancelled. Your account is safe.")
         return
 
@@ -360,6 +425,30 @@ async def _handle_message(phone_number: str, message_text: str, from_voice: bool
             await send_text(phone_number, "Supported: `currency INR`, `currency USD`, or `currency EUR`")
         return
 
+    # --- Timezone command ---
+    if text_lower.startswith("timezone"):
+        tz_input = text[len("timezone"):].strip()
+        if not tz_input:
+            current = user.get("notify_timezone") or "Asia/Kolkata"
+            alias = _TZ_REVERSE.get(current, current)
+            await send_text(phone_number, f"Your timezone is currently *{alias}* ({current}).\n\nChange it with `timezone IST`, `timezone EST`, etc.")
+            return
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+        iana = TIMEZONE_ALIASES.get(tz_input.upper(), tz_input)
+        try:
+            ZoneInfo(iana)
+            set_user_timezone(phone_number, iana)
+            alias = _TZ_REVERSE.get(iana, iana)
+            await send_text(phone_number, f"Timezone set to *{alias}* ({iana}).\nYour reminders will now fire in this timezone.")
+        except (ZoneInfoNotFoundError, KeyError):
+            await send_text(
+                phone_number,
+                "Couldn't find that timezone.\n\nTry:\n"
+                "• `timezone IST` — India\n• `timezone EST` — US East\n"
+                "• `timezone SGT` — Singapore\n• `timezone Asia/Kolkata` — IANA name"
+            )
+        return
+
     # --- Notify command ---
     if text_lower.startswith("notify"):
         arg = text_lower[len("notify"):].strip()
@@ -367,17 +456,25 @@ async def _handle_message(phone_number: str, message_text: str, from_voice: bool
             clear_notify_time(phone_number)
             await send_text(phone_number, "Daily reminder turned off.")
         else:
-            hhmm = _parse_time_input(arg)
-            if hhmm:
-                set_notify_time(phone_number, hhmm)
+            stored_tz = user.get("notify_timezone") or "Asia/Kolkata"
+            result = _parse_notify_arg(arg, stored_tz)
+            if result:
+                hhmm, iana = result
+                set_notify_time(phone_number, hhmm, iana)
+                alias = _TZ_REVERSE.get(iana, iana)
                 await send_text(
                     phone_number,
-                    f"Done! I'll remind you to log your expenses every day at *{hhmm} IST*.\n\nType `notify off` to cancel."
+                    f"Done! I'll remind you every day at *{hhmm} {alias}* ({iana}).\n\nType `notify off` to cancel."
                 )
             else:
                 await send_text(
                     phone_number,
-                    "Couldn't read that time.\n\nTry:\n• `notify 9pm`\n• `notify 21:00`\n• `notify 8:30am`\n• `notify off` to disable"
+                    "Couldn't read that.\n\nTry:\n"
+                    "• `notify 9pm` — uses your saved timezone\n"
+                    "• `notify 9pm IST` — Indian Standard Time\n"
+                    "• `notify 9pm EST` — US Eastern\n"
+                    "• `notify 9pm Asia/Singapore` — IANA name\n"
+                    "• `notify off` — disable"
                 )
         return
 
@@ -432,7 +529,7 @@ async def _handle_message(phone_number: str, message_text: str, from_voice: bool
 
     # --- Clear all expenses ---
     if text_lower == "clear":
-        user_sessions[phone_number] = {"state": "awaiting_clear_confirm"}
+        set_user_session(phone_number, {"state": "awaiting_clear_confirm"})
         await send_text(
             phone_number,
             "This will *permanently wipe all your expense data*. This cannot be undone.\n\n"
@@ -442,7 +539,7 @@ async def _handle_message(phone_number: str, message_text: str, from_voice: bool
 
     # --- Delete account ---
     if text_lower in ("delete my account", "delete account"):
-        user_sessions[phone_number] = {"state": "awaiting_delete_confirm"}
+        set_user_session(phone_number, {"state": "awaiting_delete_confirm"})
         await send_text(
             phone_number,
             "This will *permanently delete* your account and all expense data. This cannot be undone.\n\n"
@@ -458,7 +555,7 @@ async def _handle_message(phone_number: str, message_text: str, from_voice: bool
             return
         if len(batch) == 1:
             e = batch[0]
-            user_sessions[phone_number] = {"state": "awaiting_edit", "expense_id": e["id"]}
+            set_user_session(phone_number, {"state": "awaiting_edit", "expense_id": e["id"]})
             await send_text(
                 phone_number,
                 f"Last entry: *{format_amount(e['amount'], e['currency'])}* \u2014 {e['description']} ({e['category']})\n\n"
@@ -469,11 +566,11 @@ async def _handle_message(phone_number: str, message_text: str, from_voice: bool
                 f"{i + 1}. {format_amount(e['amount'], e['currency'])} \u2014 {e['description']} _{e['category']}_"
                 for i, e in enumerate(batch)
             ]
-            user_sessions[phone_number] = {
+            set_user_session(phone_number, {
                 "state": "awaiting_edit_select",
                 "expense_ids": [e["id"] for e in batch],
                 "expenses": batch,
-            }
+            })
             await send_text(
                 phone_number,
                 f"Your last entry had *{len(batch)} expenses*:\n\n" +

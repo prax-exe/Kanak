@@ -40,14 +40,20 @@ REMINDER_TEXT = (
 
 
 async def _notify_scheduler():
-    """Runs every minute. Sends reminders to users whose notify_time matches current IST time."""
+    """Runs every minute. Sends reminders to users whose notify_time matches their local time."""
     while True:
         try:
-            now_ist = datetime.datetime.now(IST)
-            hhmm = now_ist.strftime("%H:%M")
-            users = get_users_to_notify(hhmm)
+            users = get_users_to_notify()
             for user in users:
-                await send_text(user["phone_number"], REMINDER_TEXT)
+                tz_name = user.get("notify_timezone") or "Asia/Kolkata"
+                try:
+                    from zoneinfo import ZoneInfo
+                    tz = ZoneInfo(tz_name)
+                except Exception:
+                    tz = IST
+                now_local = datetime.datetime.now(tz)
+                if now_local.strftime("%H:%M") == user["notify_time"]:
+                    await send_text(user["phone_number"], REMINDER_TEXT)
         except Exception:
             logger.exception("Notification scheduler error")
         # Sleep until the start of the next minute
