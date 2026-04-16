@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 from calendar import monthrange
 from collections import defaultdict
 from .database import (
-    get_or_create_user, log_expenses, get_last_expense,
+    get_or_create_user, log_expenses, get_last_expense, get_last_batch_expenses,
     update_expense, delete_expense, get_expenses_for_period,
     set_default_currency, clear_all_expenses,
     set_notify_time, clear_notify_time, delete_user
@@ -36,7 +36,7 @@ _rate_cache: dict[str, tuple[float, float]] = {}
 _RATE_TTL = 1800  # 30 minutes
 
 # In-memory session state — acceptable for single-instance deployment
-# state values: "idle" | "awaiting_edit"
+# state values: "idle" | "awaiting_edit_select" | "awaiting_edit" | "awaiting_clear_confirm" | "awaiting_delete_confirm"
 user_sessions: dict[str, dict] = {}
 
 HELP_TEXT = """*Kanak \u2014 WhatsApp Expense Tracker*
@@ -48,6 +48,12 @@ HELP_TEXT = """*Kanak \u2014 WhatsApp Expense Tracker*
 \u2022 `$15 spotify` \u2192 USD expense
 \u2022 `\u20ac10 museum ticket` \u2192 EUR expense (INR equivalent saved automatically)
 \u2022 `4k rent` \u2192 Rs.4000 (k = thousands)
+
+*Or send a voice note:*
+\u2022 Just record and send \u2014 speak your expenses naturally
+\u2022 _"spent two hundred on lunch and fifty on chai"_
+\u2022 _"four thousand rent, eight hundred electricity"_
+Kanak will transcribe and log them automatically.
 
 *Currency prefixes you can use:*
 \u2022 `\u20b9` / `rs` / `inr` / `rupees` \u2192 Indian Rupee
@@ -65,7 +71,7 @@ HELP_TEXT = """*Kanak \u2014 WhatsApp Expense Tracker*
 \u2022 `report last month` \u2014 previous month PDF
 
 *Edit & delete:*
-\u2022 `edit last` \u2014 edit your last entry
+\u2022 `edit last` \u2014 edit your last entry (pick from list if multiple)
 \u2022 `delete last` / `undo` \u2014 delete last entry
 
 *Settings:*
@@ -186,20 +192,27 @@ def _format_summary(expenses: list[dict], label: str) -> str:
 
 
 async def handle_voice_message(phone_number: str, media_id: str):
-    from .voice import download_audio, transcribe
+    try:
+        from .voice import download_audio, transcribe
 
-    audio_bytes = await download_audio(media_id)
-    if not audio_bytes:
-        await send_text(phone_number, "Couldn't download your voice note. Please try again.")
-        return
+        audio_bytes = await download_audio(media_id)
+        if not audio_bytes:
+            await send_text(phone_number, "Couldn't download your voice note. Please try again.")
+            return
 
-    transcript = await transcribe(audio_bytes)
-    if not transcript:
-        await send_text(phone_number, "Couldn't understand that voice note. Try speaking clearly or just type it.")
-        return
+        transcript = await transcribe(audio_bytes)
+        if not transcript:
+            await send_text(phone_number, "Couldn't understand that voice note. Try speaking clearly or just type it.")
+            return
 
-    await send_text(phone_number, f"_Heard: {transcript}_")
-    await handle_message(phone_number, transcript, from_voice=True)
+        await send_text(phone_number, f"_Heard: {transcript}_")
+        await _handle_message(phone_number, transcript, from_voice=True)
+    except Exception:
+        logger.exception("handle_voice_message failed for %s", phone_number)
+        try:
+            await send_text(phone_number, "Something went wrong processing your voice note. Please try again.")
+        except Exception:
+            logger.exception("Failed to send voice error message to %s", phone_number)
 
 
 def _parse_time_input(raw: str) -> str | None:
@@ -223,6 +236,17 @@ def _parse_time_input(raw: str) -> str | None:
 
 
 async def handle_message(phone_number: str, message_text: str, from_voice: bool = False):
+    try:
+        await _handle_message(phone_number, message_text, from_voice)
+    except Exception:
+        logger.exception("handle_message failed for %s", phone_number)
+        try:
+            await send_text(phone_number, "Something went wrong on my end. Please try again in a moment.")
+        except Exception:
+            logger.exception("Failed to send error message to %s", phone_number)
+
+
+async def _handle_message(phone_number: str, message_text: str, from_voice: bool = False):
     text = message_text.strip()
     text_lower = text.lower()
 
@@ -233,6 +257,10 @@ async def handle_message(phone_number: str, message_text: str, from_voice: bool 
     if session.get("state") == "awaiting_edit":
         expense_id = session.get("expense_id")
         if expense_id:
+            if text_lower == "cancel":
+                user_sessions.pop(phone_number, None)
+                await send_text(phone_number, "Edit cancelled.")
+                return
             parsed = parse_expenses(text, user["default_currency"])
             if parsed:
                 e = parsed[0]
@@ -247,9 +275,47 @@ async def handle_message(phone_number: str, message_text: str, from_voice: bool 
                     f"\u2713 Updated: {format_amount(e.amount, e.currency)} \u2014 {e.description} ({e.category})")
             else:
                 await send_text(phone_number, "Couldn't parse that. Try: `3500 bike repair`\n\nSend `cancel` to abort.")
-                if text_lower == "cancel":
-                    user_sessions.pop(phone_number, None)
-                    await send_text(phone_number, "Edit cancelled.")
+        return
+
+    # --- Awaiting batch-edit selection (user picks which expense to edit) ---
+    if session.get("state") == "awaiting_edit_select":
+        expense_ids = session.get("expense_ids", [])
+        expenses = session.get("expenses", [])
+        if text_lower == "cancel":
+            user_sessions.pop(phone_number, None)
+            await send_text(phone_number, "Edit cancelled.")
+            return
+        try:
+            idx = int(text.strip()) - 1
+            if 0 <= idx < len(expense_ids):
+                e = expenses[idx]
+                user_sessions[phone_number] = {"state": "awaiting_edit", "expense_id": expense_ids[idx]}
+                await send_text(
+                    phone_number,
+                    f"Editing: *{format_amount(e['amount'], e['currency'])}* \u2014 {e['description']} ({e['category']})\n\n"
+                    f"Send the corrected entry (or `cancel`):"
+                )
+            else:
+                await send_text(
+                    phone_number,
+                    f"Please reply with a number between 1 and {len(expense_ids)}, or `cancel`."
+                )
+        except ValueError:
+            await send_text(
+                phone_number,
+                f"Please reply with a number between 1 and {len(expense_ids)}, or `cancel`."
+            )
+        return
+
+    # --- Awaiting clear expenses confirmation ---
+    if session.get("state") == "awaiting_clear_confirm":
+        if text == "CONFIRM CLEAR":
+            clear_all_expenses(user["id"])
+            user_sessions.pop(phone_number, None)
+            await send_text(phone_number, "All your expense data has been wiped.")
+        else:
+            user_sessions.pop(phone_number, None)
+            await send_text(phone_number, "Cancelled. Your data is safe.")
         return
 
     # --- Awaiting delete account confirmation ---
@@ -314,8 +380,12 @@ async def handle_message(phone_number: str, message_text: str, from_voice: bool 
 
     # --- Clear all expenses ---
     if text_lower == "clear":
-        clear_all_expenses(user["id"])
-        await send_text(phone_number, "All your expense data has been wiped.")
+        user_sessions[phone_number] = {"state": "awaiting_clear_confirm"}
+        await send_text(
+            phone_number,
+            "This will *permanently wipe all your expense data*. This cannot be undone.\n\n"
+            "Type *CONFIRM CLEAR* to proceed, or anything else to cancel."
+        )
         return
 
     # --- Delete account ---
@@ -330,14 +400,34 @@ async def handle_message(phone_number: str, message_text: str, from_voice: bool 
 
     # --- Edit last ---
     if text_lower == "edit last":
-        last = get_last_expense(user["id"])
-        if last:
-            user_sessions[phone_number] = {"state": "awaiting_edit", "expense_id": last["id"]}
-            await send_text(phone_number,
-                f"Last entry: *{format_amount(last['amount'], last['currency'])}* \u2014 {last['description']} ({last['category']})\n\n"
-                f"Send the corrected entry (or `cancel`):")
-        else:
+        batch = get_last_batch_expenses(user["id"])
+        if not batch:
             await send_text(phone_number, "No recent expense to edit.")
+            return
+        if len(batch) == 1:
+            e = batch[0]
+            user_sessions[phone_number] = {"state": "awaiting_edit", "expense_id": e["id"]}
+            await send_text(
+                phone_number,
+                f"Last entry: *{format_amount(e['amount'], e['currency'])}* \u2014 {e['description']} ({e['category']})\n\n"
+                f"Send the corrected entry (or `cancel`):"
+            )
+        else:
+            lines = [
+                f"{i + 1}. {format_amount(e['amount'], e['currency'])} \u2014 {e['description']} _{e['category']}_"
+                for i, e in enumerate(batch)
+            ]
+            user_sessions[phone_number] = {
+                "state": "awaiting_edit_select",
+                "expense_ids": [e["id"] for e in batch],
+                "expenses": batch,
+            }
+            await send_text(
+                phone_number,
+                f"Your last entry had *{len(batch)} expenses*:\n\n" +
+                "\n".join(lines) +
+                "\n\nReply with a number to edit that one (e.g. `1` or `2`), or `cancel`."
+            )
         return
 
     # --- Date queries ---

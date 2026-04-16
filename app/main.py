@@ -3,6 +3,7 @@ import hmac
 import json
 import hashlib
 import asyncio
+import logging
 import datetime
 from calendar import monthrange
 from contextlib import asynccontextmanager
@@ -10,6 +11,8 @@ from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import PlainTextResponse
+
+logger = logging.getLogger(__name__)
 
 from .commands import handle_message, handle_voice_message, send_document, send_text
 from .database import get_all_users, get_expenses_for_period, get_users_to_notify
@@ -46,7 +49,7 @@ async def _notify_scheduler():
             for user in users:
                 await send_text(user["phone_number"], REMINDER_TEXT)
         except Exception:
-            pass
+            logger.exception("Notification scheduler error")
         # Sleep until the start of the next minute
         await asyncio.sleep(60 - datetime.datetime.now(IST).second)
 
@@ -128,18 +131,25 @@ async def _send_monthly_reports():
     # Report covers the previous month
     first_day = (today.replace(day=1) - datetime.timedelta(days=1)).replace(day=1)
     last_day = first_day.replace(day=monthrange(first_day.year, first_day.month)[1])
+    month_label = first_day.strftime("%B %Y")
 
     users = get_all_users()
+    logger.info("Monthly report run started: %s, %d users", month_label, len(users))
+    sent = 0
     for user in users:
-        expenses = get_expenses_for_period(user["id"], first_day, last_day)
-        if not expenses:
-            continue
-        pdf_data = generate_pdf_report(expenses, user, first_day)
-        month_label = first_day.strftime("%B %Y")
-        await send_document(
-            user["phone_number"],
-            f"kanak_{first_day.strftime('%Y_%m')}.pdf",
-            pdf_data,
-            f"Your expense report for {month_label} \ud83d\udcca",
-            "application/pdf"
-        )
+        try:
+            expenses = get_expenses_for_period(user["id"], first_day, last_day)
+            if not expenses:
+                continue
+            pdf_data = generate_pdf_report(expenses, user, first_day)
+            await send_document(
+                user["phone_number"],
+                f"kanak_{first_day.strftime('%Y_%m')}.pdf",
+                pdf_data,
+                f"Your expense report for {month_label} \ud83d\udcca",
+                "application/pdf"
+            )
+            sent += 1
+        except Exception:
+            logger.exception("Monthly report failed for user %s", user.get("id"))
+    logger.info("Monthly report run complete: %d/%d sent", sent, len(users))

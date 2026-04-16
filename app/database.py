@@ -55,6 +55,27 @@ def get_last_expense(user_id: str) -> Optional[dict]:
     return result.data[0] if result.data else None
 
 
+def get_last_batch_expenses(user_id: str) -> list[dict]:
+    """Return all expenses from the user's most recent input batch.
+
+    Expenses logged in one message share the same raw_input + expense_date.
+    Grouping on both prevents collisions when the same text is typed on different days.
+    """
+    last = get_last_expense(user_id)
+    if not last:
+        return []
+    result = (
+        supabase.table("expenses")
+        .select("*")
+        .eq("user_id", user_id)
+        .eq("raw_input", last["raw_input"])
+        .eq("expense_date", last["expense_date"])
+        .order("created_at", desc=False)
+        .execute()
+    )
+    return result.data
+
+
 def update_expense(expense_id: str, updates: dict):
     supabase.table("expenses").update(updates).eq("id", expense_id).execute()
 
