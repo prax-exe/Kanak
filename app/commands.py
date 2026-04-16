@@ -12,7 +12,8 @@ from .database import (
     get_or_create_user, log_expenses, get_last_expense, get_last_batch_expenses,
     update_expense, delete_expense, get_expenses_for_period,
     set_default_currency, clear_all_expenses,
-    set_notify_time, clear_notify_time, delete_user
+    set_notify_time, clear_notify_time, delete_user,
+    set_budget, clear_budget,
 )
 from .parser import parse_expenses
 from .reports import generate_pdf_report, generate_excel_report, format_amount
@@ -78,6 +79,8 @@ Kanak will transcribe and log them automatically.
 \u2022 `currency INR` \u2014 set default to Rupees
 \u2022 `currency USD` \u2014 set default to Dollars
 \u2022 `currency EUR` \u2014 set default to Euros
+\u2022 `budget 10000` \u2014 set monthly budget (alerts at 50%, 80%, 100%)
+\u2022 `budget off` \u2014 remove budget
 \u2022 `notify 9pm` \u2014 daily reminder at 9 PM IST
 \u2022 `notify off` \u2014 turn off reminder
 
@@ -153,6 +156,24 @@ async def send_document(to: str, filename: str, data: bytes, caption: str, mime_
                 "filename": filename
             }
         },
+    )
+
+
+def _budget_status_line(spent: float, budget: float, currency: str) -> str:
+    """Return a single-line budget summary with a text progress bar."""
+    pct = spent / budget
+    filled = min(int(pct * 10), 10)
+    bar = "\u2593" * filled + "\u2591" * (10 - filled)
+    remaining = budget - spent
+    if remaining >= 0:
+        return (
+            f"\n\n*Budget: {format_amount(budget, currency)}*\n"
+            f"{bar} {pct:.0%} used \u2014 {format_amount(remaining, currency)} left"
+        )
+    over = abs(remaining)
+    return (
+        f"\n\n*Budget: {format_amount(budget, currency)}*\n"
+        f"{bar} {pct:.0%} used \u2014 *{format_amount(over, currency)} over budget*"
     )
 
 
@@ -360,6 +381,37 @@ async def _handle_message(phone_number: str, message_text: str, from_voice: bool
                 )
         return
 
+    # --- Budget command ---
+    if text_lower.startswith("budget"):
+        arg = text_lower[len("budget"):].strip()
+        if arg in ("off", "clear", "remove"):
+            clear_budget(phone_number)
+            await send_text(phone_number, "Monthly budget removed.")
+        else:
+            # Parse amount — support "10k", "10000", "10,000"
+            import re
+            clean = re.sub(r"[,\s]", "", arg)
+            clean = re.sub(r"k$", "000", clean)
+            try:
+                amount = float(clean)
+                if amount <= 0:
+                    raise ValueError
+                set_budget(phone_number, amount)
+                cur = user["default_currency"]
+                await send_text(
+                    phone_number,
+                    f"Monthly budget set to *{format_amount(amount, cur)}*.\n\n"
+                    f"I'll alert you at 50%, 80%, and 100%.\n"
+                    f"_Note: only {cur} expenses count toward this budget._"
+                )
+            except (ValueError, AttributeError):
+                await send_text(
+                    phone_number,
+                    "Couldn't read that amount.\n\nTry:\n"
+                    "• `budget 10000`\n• `budget 10k`\n• `budget off` to remove"
+                )
+        return
+
     # --- Help / Greetings ---
     greetings = {"help", "hi", "hello", "/help", "/start", "hey", "helo",
                  "vanakkam", "namaste", "namaskar", "yo", "sup", "start", "menu"}
@@ -451,7 +503,13 @@ async def _handle_message(phone_number: str, message_text: str, from_voice: bool
     if text_lower in ("month", "this month", "summary"):
         start = today.replace(day=1)
         expenses = get_expenses_for_period(user["id"], start, today)
-        await send_text(phone_number, _format_summary(expenses, today.strftime("%B %Y")))
+        reply = _format_summary(expenses, today.strftime("%B %Y"))
+        budget = user.get("monthly_budget")
+        if budget:
+            cur = user["default_currency"]
+            spent = sum(e["amount"] for e in expenses if e["currency"] == cur)
+            reply += _budget_status_line(spent, float(budget), cur)
+        await send_text(phone_number, reply)
         return
 
     # --- Reports ---
@@ -520,3 +578,24 @@ async def _handle_message(phone_number: str, message_text: str, from_voice: bool
         reply += "\n\n_Welcome to Kanak! Type *help* to see all commands._"
 
     await send_text(phone_number, reply)
+
+    # --- Budget threshold alerts ---
+    budget = user.get("monthly_budget")
+    if budget:
+        budget = float(budget)
+        cur = user["default_currency"]
+        start = date.today().replace(day=1)
+        month_expenses = get_expenses_for_period(user["id"], start, date.today())
+        new_total = sum(e["amount"] for e in month_expenses if e["currency"] == cur)
+        just_added = sum(e.amount for e in parsed if e.currency == cur)
+        old_total = new_total - just_added
+
+        thresholds = [
+            (1.0, f"You've hit your *{format_amount(budget, cur)} budget* for {date.today().strftime('%B')}! Time to review your spending."),
+            (0.8, f"Heads up — you've used *80%* of your {date.today().strftime('%B')} budget ({format_amount(budget, cur)})."),
+            (0.5, f"You're halfway through your {date.today().strftime('%B')} budget ({format_amount(budget, cur)})."),
+        ]
+        for ratio, alert_msg in thresholds:
+            if old_total < budget * ratio <= new_total:
+                await send_text(phone_number, alert_msg)
+                break
