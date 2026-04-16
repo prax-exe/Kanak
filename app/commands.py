@@ -473,7 +473,7 @@ async def _handle_message(phone_number: str, message_text: str, from_voice: bool
                 f"kanak_{first_day.strftime('%Y_%m')}.csv",
                 csv_data,
                 f"Expenses \u2014 {month_label}",
-                "text/csv"
+                "text/plain"
             )
         else:
             pdf_data = generate_pdf_report(expenses, user, first_day)
