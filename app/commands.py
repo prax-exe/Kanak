@@ -15,7 +15,7 @@ from .database import (
     set_notify_time, clear_notify_time, delete_user
 )
 from .parser import parse_expenses
-from .reports import generate_pdf_report, generate_csv_report, format_amount
+from .reports import generate_pdf_report, generate_excel_report, format_amount
 
 PHONE_NUMBER_ID = os.environ.get("WHATSAPP_PHONE_NUMBER_ID", "")
 ACCESS_TOKEN = os.environ.get("WHATSAPP_ACCESS_TOKEN", "")
@@ -67,7 +67,7 @@ Kanak will transcribe and log them automatically.
 
 *Reports:*
 \u2022 `report` \u2014 PDF for this month
-\u2022 `report csv` \u2014 CSV for this month
+\u2022 `report excel` \u2014 Excel (.xlsx) for this month
 \u2022 `report last month` \u2014 previous month PDF
 
 *Edit & delete:*
@@ -466,14 +466,14 @@ async def _handle_message(phone_number: str, message_text: str, from_voice: bool
         expenses = get_expenses_for_period(user["id"], first_day, last_day)
         month_label = first_day.strftime("%B %Y")
 
-        if "csv" in text_lower:
-            csv_data = generate_csv_report(expenses)
+        if "csv" in text_lower or "excel" in text_lower:
+            xlsx_data = generate_excel_report(expenses, first_day)
             await send_document(
                 phone_number,
-                f"kanak_{first_day.strftime('%Y_%m')}.csv",
-                csv_data,
+                f"kanak_{first_day.strftime('%Y_%m')}.xlsx",
+                xlsx_data,
                 f"Expenses \u2014 {month_label}",
-                "text/plain"
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
             pdf_data = generate_pdf_report(expenses, user, first_day)

@@ -1,5 +1,4 @@
 import io
-import csv
 from datetime import date
 from collections import defaultdict
 from reportlab.lib.pagesizes import A4
@@ -154,16 +153,74 @@ def generate_pdf_report(expenses: list[dict], user: dict, month: date) -> bytes:
     return buffer.getvalue()
 
 
-def generate_csv_report(expenses: list[dict]) -> bytes:
-    buffer = io.StringIO()
-    writer = csv.writer(buffer)
-    writer.writerow(["Date", "Description", "Category", "Amount", "Currency"])
-    for e in expenses:
-        writer.writerow([
+def generate_excel_report(expenses: list[dict], month: date) -> bytes:
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = month.strftime("%B %Y")
+
+    header_fill = PatternFill(fill_type="solid", fgColor="1a1a2e")
+    header_font = Font(bold=True, color="FFFFFF", size=10)
+    normal_font = Font(size=10)
+    alt_fill = PatternFill(fill_type="solid", fgColor="F4F6F9")
+
+    headers = ["Date", "Description", "Category", "Amount", "Currency", "INR Equivalent"]
+    for col, h in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col, value=h)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center")
+
+    for row_idx, e in enumerate(expenses, 2):
+        fill = alt_fill if row_idx % 2 == 0 else PatternFill()
+        values = [
             e["expense_date"],
             e["description"],
             e["category"],
             e["amount"],
-            e["currency"]
-        ])
-    return buffer.getvalue().encode("utf-8")
+            e["currency"],
+            e.get("inr_equivalent") or "",
+        ]
+        for col, val in enumerate(values, 1):
+            cell = ws.cell(row=row_idx, column=col, value=val)
+            cell.font = normal_font
+            cell.fill = fill
+
+    # Right-align amount columns
+    for row in ws.iter_rows(min_row=2, min_col=4, max_col=6):
+        for cell in row:
+            cell.alignment = Alignment(horizontal="right")
+
+    # Auto-width columns
+    col_widths = [12, 36, 18, 12, 10, 16]
+    for col, width in enumerate(col_widths, 1):
+        ws.column_dimensions[get_column_letter(col)].width = width
+
+    # Summary sheet
+    ws2 = wb.create_sheet("Summary")
+    ws2.cell(row=1, column=1, value="Category").font = header_font
+    ws2.cell(row=1, column=1).fill = header_fill
+    ws2.cell(row=1, column=2, value="Total").font = header_font
+    ws2.cell(row=1, column=2).fill = header_fill
+
+    by_category: dict[str, dict[str, float]] = {}
+    for e in expenses:
+        cat = e["category"]
+        cur = e["currency"]
+        by_category.setdefault(cat, {})
+        by_category[cat][cur] = by_category[cat].get(cur, 0) + e["amount"]
+
+    for row_idx, (cat, currencies) in enumerate(sorted(by_category.items()), 2):
+        total_str = " + ".join(f"{format_amount(amt, cur)}" for cur, amt in currencies.items())
+        ws2.cell(row=row_idx, column=1, value=cat).font = normal_font
+        ws2.cell(row=row_idx, column=2, value=total_str).font = normal_font
+
+    ws2.column_dimensions["A"].width = 20
+    ws2.column_dimensions["B"].width = 24
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
