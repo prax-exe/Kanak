@@ -14,7 +14,7 @@ from fastapi.responses import PlainTextResponse
 
 logger = logging.getLogger(__name__)
 
-from .commands import handle_message, handle_voice_message, send_document, send_text
+from .commands import handle_message, handle_voice_message, handle_image_message, send_document, send_text
 from .database import get_all_users, get_expenses_for_period, get_users_to_notify
 from .reports import generate_pdf_report
 
@@ -112,6 +112,10 @@ async def receive_message(request: Request, background_tasks: BackgroundTasks):
         elif msg_type == "audio":
             media_id = message["audio"]["id"]
             background_tasks.add_task(handle_voice_message, phone_number, media_id)
+        elif msg_type == "image":
+            media_id = message["image"]["id"]
+            mime_type = message["image"].get("mime_type", "image/jpeg")
+            background_tasks.add_task(handle_image_message, phone_number, media_id, mime_type)
 
     except (KeyError, IndexError):
         # Malformed payload — ignore silently

@@ -17,7 +17,8 @@ from .database import (
     set_user_session, clear_user_session,
     search_expenses,
 )
-from .parser import parse_expenses
+from .models import ParsedExpense
+from .parser import parse_expenses, classify_intent
 from .reports import generate_pdf_report, generate_excel_report, format_amount
 
 PHONE_NUMBER_ID = os.environ.get("WHATSAPP_PHONE_NUMBER_ID", "")
@@ -97,7 +98,12 @@ HELP_TEXT = """*Kanak \u2014 WhatsApp Expense Tracker*
 \u2022 Just record and send \u2014 speak your expenses naturally
 \u2022 _"spent two hundred on lunch and fifty on chai"_
 \u2022 _"four thousand rent, eight hundred electricity"_
-Kanak will transcribe and log them automatically.
+Kanak will show you what it heard and ask before logging.
+
+*Or send a photo of a bill/receipt:*
+\u2022 Take a photo of any bill and send it
+\u2022 Kanak reads it with AI and lists what was found
+\u2022 You confirm before anything gets logged
 
 *Currency prefixes you can use:*
 \u2022 `\u20b9` / `rs` / `inr` / `rupees` \u2192 Indian Rupee
@@ -288,6 +294,53 @@ async def handle_voice_message(phone_number: str, media_id: str):
             logger.exception("Failed to send voice error message to %s", phone_number)
 
 
+async def handle_image_message(phone_number: str, media_id: str, mime_type: str):
+    try:
+        from .receipt import download_image, scan_receipt
+
+        user = get_or_create_user(phone_number)
+        await send_text(phone_number, "_Scanning your receipt\u2026_")
+
+        image_bytes = await download_image(media_id)
+        if not image_bytes:
+            await send_text(phone_number, "Couldn't download your image. Please try again.")
+            return
+
+        items = await scan_receipt(image_bytes, mime_type)
+        if not items:
+            await send_text(phone_number, "Couldn't read the receipt. Make sure the image is clear and try again.")
+            return
+
+        lines = []
+        for item in items:
+            try:
+                amount = float(item.get("amount", 0))
+                currency = str(item.get("currency", user["default_currency"])).upper()
+                if currency not in ("INR", "USD", "EUR"):
+                    currency = user["default_currency"]
+                desc = str(item.get("description", "Item")).strip()
+                cat = str(item.get("category", "Other")).strip()
+                lines.append(f"\u2022 {format_amount(amount, currency)} \u2014 {desc} _{cat}_")
+            except (ValueError, TypeError):
+                continue
+
+        if not lines:
+            await send_text(phone_number, "Couldn't extract any expenses from the receipt.")
+            return
+
+        reply = "*Found on receipt:*\n" + "\n".join(lines)
+        reply += "\n\nLog these? Reply *yes* to log or *no* to discard."
+        await send_text(phone_number, reply)
+        set_user_session(phone_number, {"state": "awaiting_image_confirm", "items": items})
+
+    except Exception:
+        logger.exception("handle_image_message failed for %s", phone_number)
+        try:
+            await send_text(phone_number, "Something went wrong scanning your receipt. Please try again.")
+        except Exception:
+            logger.exception("Failed to send image error message to %s", phone_number)
+
+
 def _parse_notify_arg(arg: str, stored_tz: str) -> tuple[str, str] | None:
     """Parse 'HH:MM [timezone]' → (hhmm, iana_tz) or None.
 
@@ -357,6 +410,45 @@ async def _handle_message(phone_number: str, message_text: str, from_voice: bool
         else:
             clear_user_session(phone_number)
             await send_text(phone_number, "Voice note discarded.")
+        return
+
+    # --- Awaiting receipt image confirmation ---
+    if session.get("state") == "awaiting_image_confirm":
+        items = session.get("items", [])
+        if text_lower in ("yes", "y", "yep", "yeah", "ok", "okay", "confirm", "log"):
+            clear_user_session(phone_number)
+            parsed = []
+            for item in items:
+                try:
+                    amount = float(item.get("amount", 0))
+                    currency = str(item.get("currency", user["default_currency"])).upper()
+                    if currency not in ("INR", "USD", "EUR"):
+                        currency = user["default_currency"]
+                    desc = str(item.get("description", "Item")).strip()
+                    cat = str(item.get("category", "Other")).strip()
+                    if amount > 0:
+                        parsed.append(ParsedExpense(amount=amount, currency=currency, description=desc, category=cat))
+                except (ValueError, TypeError):
+                    continue
+            if not parsed:
+                await send_text(phone_number, "Nothing valid to log.")
+                return
+            inr_equivs = await asyncio.gather(*[fetch_inr_equivalent(e.amount, e.currency) for e in parsed])
+            for expense, equiv in zip(parsed, inr_equivs):
+                expense.inr_equivalent = equiv
+            log_expenses(user["id"], parsed, "receipt scan")
+            lines = [f"\u2713 {format_amount(e.amount, e.currency)} \u2014 {e.description} _{e.category}_" for e in parsed]
+            reply = "\n".join(lines)
+            if len(parsed) > 1:
+                totals: dict[str, float] = defaultdict(float)
+                for e in parsed:
+                    totals[e.currency] += e.amount
+                total_str = " + ".join(format_amount(amt, cur) for cur, amt in totals.items())
+                reply += f"\n\n*{len(parsed)} expenses logged \u2014 {total_str}*"
+            await send_text(phone_number, reply)
+        else:
+            clear_user_session(phone_number)
+            await send_text(phone_number, "Receipt discarded.")
         return
 
     # --- Awaiting edit confirmation ---
@@ -680,6 +772,23 @@ async def _handle_message(phone_number: str, message_text: str, from_voice: bool
     parsed = parse_expenses(text, user["default_currency"], from_voice=from_voice)
 
     if not parsed:
+        intent, param = await classify_intent(text)
+        _intent_map = {
+            "today": "today",
+            "week": "week",
+            "month": "month",
+            "report": "report",
+            "report_last_month": "report last month",
+            "edit": "edit last",
+            "delete": "delete last",
+            "help": "help",
+        }
+        if intent in _intent_map:
+            await _handle_message(phone_number, _intent_map[intent], from_voice)
+            return
+        if intent == "search" and param:
+            await _handle_message(phone_number, f"search {param}", from_voice)
+            return
         await send_text(phone_number,
             "Couldn't read that as an expense.\n\n"
             "Try: `4000 bike repair` or `199 netflix, 800 groceries`\n\n"

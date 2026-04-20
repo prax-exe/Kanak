@@ -1,10 +1,11 @@
 import os
 import json
 import re
-from groq import Groq
+from groq import Groq, AsyncGroq
 from .models import ParsedExpense
 
 client = Groq(api_key=os.environ["GROQ_API_KEY"])
+_async_client = AsyncGroq(api_key=os.environ["GROQ_API_KEY"])
 
 SYSTEM_PROMPT = """You are an expense parsing assistant. Extract ALL expenses from the user's message.
 
@@ -97,6 +98,45 @@ def _extract_expenses(raw: str, default_currency: str) -> list[ParsedExpense]:
         except (KeyError, ValueError, TypeError):
             continue
     return expenses
+
+
+_INTENT_SYSTEM = """Classify a WhatsApp message for an expense tracker. Return JSON only, no explanation.
+
+Intents:
+- today: view today's expenses ("what did I spend", "show today", "today total", "today's expenses")
+- week: this week summary ("this week", "weekly", "week total", "spending this week")
+- month: this month summary ("this month", "monthly", "how much", "my spending", "total", "overview", "summary")
+- report: wants a PDF/Excel report ("give report", "send report", "download")
+- report_last_month: last month's report ("last month report")
+- search: search expenses by keyword — extract keyword as param ("show petrol expenses", "find netflix", "search food")
+- edit: edit last expense ("change last", "fix that", "wrong entry", "edit")
+- delete: delete last expense ("remove last", "delete that", "undo that")
+- help: wants help or command list ("what can you do", "commands", "options", "menu")
+- unknown: none of the above — likely a poorly formatted expense
+
+Return: {"intent": "month", "param": null}
+For search: {"intent": "search", "param": "petrol"}"""
+
+
+async def classify_intent(text: str) -> tuple[str, str | None]:
+    """Classify user intent when no command pattern matched. Returns (intent, param)."""
+    try:
+        resp = await _async_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": _INTENT_SYSTEM},
+                {"role": "user", "content": text}
+            ],
+            max_tokens=50,
+            temperature=0,
+        )
+        raw = resp.choices[0].message.content.strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        data = json.loads(raw)
+        return data.get("intent", "unknown"), data.get("param")
+    except Exception:
+        return "unknown", None
 
 
 def parse_expenses(message: str, default_currency: str = "INR", from_voice: bool = False) -> list[ParsedExpense]:
