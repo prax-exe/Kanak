@@ -146,6 +146,19 @@ def get_users_to_notify() -> list[dict]:
     return [u for u in result.data if u.get("notify_time")]
 
 
+def search_expenses(user_id: str, query: str) -> list[dict]:
+    result = (
+        supabase.table("expenses")
+        .select("*")
+        .eq("user_id", user_id)
+        .ilike("description", f"%{query}%")
+        .order("expense_date", desc=True)
+        .limit(20)
+        .execute()
+    )
+    return result.data
+
+
 def set_user_session(phone_number: str, state: dict):
     supabase.table("users").update({"session_state": state}).eq("phone_number", phone_number).execute()
 

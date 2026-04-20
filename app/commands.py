@@ -15,6 +15,7 @@ from .database import (
     set_notify_time, set_user_timezone, clear_notify_time, delete_user,
     set_budget, clear_budget,
     set_user_session, clear_user_session,
+    search_expenses,
 )
 from .parser import parse_expenses
 from .reports import generate_pdf_report, generate_excel_report, format_amount
@@ -112,6 +113,10 @@ Kanak will transcribe and log them automatically.
 \u2022 `report` \u2014 PDF for this month
 \u2022 `report excel` \u2014 Excel (.xlsx) for this month
 \u2022 `report last month` \u2014 previous month PDF
+
+*Search:*
+\u2022 `search petrol` \u2014 find expenses matching a keyword
+\u2022 `search netflix` \u2014 shows up to 20 most recent matches
 
 *Edit & delete:*
 \u2022 `edit last` \u2014 edit your last entry (pick from list if multiple)
@@ -270,8 +275,11 @@ async def handle_voice_message(phone_number: str, media_id: str):
             await send_text(phone_number, "Couldn't understand that voice note. Try speaking clearly or just type it.")
             return
 
-        await send_text(phone_number, f"_Heard: {transcript}_")
-        await _handle_message(phone_number, transcript, from_voice=True)
+        await send_text(
+            phone_number,
+            f"_Heard: {transcript}_\n\nLog this? Reply *yes* to log or *no* to discard."
+        )
+        set_user_session(phone_number, {"state": "awaiting_voice_confirm", "transcript": transcript})
     except Exception:
         logger.exception("handle_voice_message failed for %s", phone_number)
         try:
@@ -339,6 +347,17 @@ async def _handle_message(phone_number: str, message_text: str, from_voice: bool
 
     user = get_or_create_user(phone_number)
     session = user.get("session_state") or {"state": "idle"}
+
+    # --- Awaiting voice note confirmation ---
+    if session.get("state") == "awaiting_voice_confirm":
+        transcript = session.get("transcript", "")
+        if text_lower in ("yes", "y", "yep", "yeah", "ok", "okay", "confirm", "log"):
+            clear_user_session(phone_number)
+            await _handle_message(phone_number, transcript, from_voice=True)
+        else:
+            clear_user_session(phone_number)
+            await send_text(phone_number, "Voice note discarded.")
+        return
 
     # --- Awaiting edit confirmation ---
     if session.get("state") == "awaiting_edit":
@@ -639,6 +658,21 @@ async def _handle_message(phone_number: str, message_text: str, from_voice: bool
                 f"Expenses \u2014 {month_label}",
                 "application/pdf"
             )
+        return
+
+    # --- Search expenses ---
+    if text_lower.startswith("search "):
+        query = text[len("search "):].strip()
+        if not query:
+            await send_text(phone_number, "Try: `search netflix` or `search petrol`")
+            return
+        results = search_expenses(user["id"], query)
+        if not results:
+            await send_text(phone_number, f'No expenses found matching *"{query}"*.')
+            return
+        count = len(results)
+        header = f'*Search: "{query}"* — {count} result{"s" if count != 1 else ""}\n\n'
+        await send_text(phone_number, header + _format_expense_list(results))
         return
 
     # --- Default: parse as expense ---
