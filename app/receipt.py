@@ -9,22 +9,31 @@ logger = logging.getLogger(__name__)
 GRAPH_API_BASE = "https://graph.facebook.com/v19.0"
 _ACCESS_TOKEN = os.environ.get("WHATSAPP_ACCESS_TOKEN", "")
 _GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
-_GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+_GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 
-_RECEIPT_PROMPT = """You are an expense extractor for a bill/receipt scanner.
-Look at this receipt or bill image and extract all expense items.
+_RECEIPT_PROMPT = """You are an expense extractor. Carefully read this bill or receipt image and extract all expense items.
 
-Return ONLY a valid JSON array, no markdown, no explanation:
-[{"description": "Coffee", "amount": 150.0, "currency": "INR", "category": "Food"}]
+Return ONLY a valid JSON array — no markdown fences, no explanation, just the array:
+[{"description": "Masala Dosa", "amount": 120.0, "currency": "INR", "category": "Food"}]
 
-Categories (use exactly): Food, Transport, Entertainment, Health, Shopping, Utilities, Personal Care, Education, Travel, Other
-Currency: ₹ or Rs = INR, $ = USD, € = EUR. If unclear or not shown, use INR.
+Categories (pick exactly one): Food, Transport, Entertainment, Health, Shopping, Utilities, Personal Care, Education, Travel, Other
 
-Rules:
-- If the bill is itemized, return each line item separately.
-- If it shows only a total, return one object with the total amount.
-- Parse amounts exactly as shown — no rounding or inflation.
-- If you cannot read the receipt clearly, return [].
+Currency detection:
+- ₹ or Rs. or INR or no symbol on Indian receipts → "INR"
+- $ or USD → "USD"
+- € or EUR → "EUR"
+- Default to "INR" if unsure
+
+Extraction rules:
+- Extract each individual line item (e.g. "Paneer Butter Masala", "Coke", "Garlic Naan") as separate entries
+- If quantity × price shown, compute the line total (e.g. 2 × 80 = 160)
+- Include taxes (GST, VAT, service tax) as a separate item: {"description": "GST/Tax", "amount": X, "currency": "INR", "category": "Other"}
+- Include service charge as a separate item if shown
+- If ONLY a grand total is visible (no itemization), return one entry with the total and a description like "Restaurant bill" or "Grocery bill"
+- Skip zero-amount lines, discounts/negative items, and tip lines
+- Parse amounts exactly — no rounding. 149.00 stays 149.0
+- If the image is too blurry to read, return []
+
 Return ONLY the JSON array."""
 
 
@@ -56,7 +65,7 @@ async def scan_receipt(image_bytes: bytes, mime_type: str = "image/jpeg") -> lis
                 {"inline_data": {"mime_type": mime_type, "data": base64.b64encode(image_bytes).decode()}}
             ]
         }],
-        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 512}
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 1024}
     }
 
     try:

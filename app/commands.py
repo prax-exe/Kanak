@@ -89,55 +89,56 @@ HELP_TEXT = """*Kanak \u2014 WhatsApp Expense Tracker*
 *Log expenses \u2014 just type naturally:*
 \u2022 `coffee 50` \u2192 Rs.50 under Food
 \u2022 `4000 bike repair` \u2192 Rs.4000 under Transport
-\u2022 `199 netflix, 800 groceries` \u2192 two expenses at once
+\u2022 `199 netflix, 800 groceries` \u2192 two at once
 \u2022 `$15 spotify` \u2192 USD expense
-\u2022 `\u20ac10 museum ticket` \u2192 EUR expense (INR equivalent saved automatically)
+\u2022 `\u20ac10 museum ticket` \u2192 EUR (INR equivalent saved)
 \u2022 `4k rent` \u2192 Rs.4000 (k = thousands)
 
 *Or send a voice note:*
-\u2022 Just record and send \u2014 speak your expenses naturally
-\u2022 _"spent two hundred on lunch and fifty on chai"_
-\u2022 _"four thousand rent, eight hundred electricity"_
-Kanak will show you what it heard and ask before logging.
+\u2022 Record and send \u2014 speak naturally
+\u2022 _"two hundred lunch, fifty chai"_
+\u2022 Kanak shows what it heard \u2014 you confirm before logging
 
-*Or send a photo of a bill/receipt:*
-\u2022 Take a photo of any bill and send it
-\u2022 Kanak reads it with AI and lists what was found
-\u2022 You confirm before anything gets logged
+*Or send a photo of any bill/receipt:*
+\u2022 Kanak reads it with AI (restaurant, grocery, any bill)
+\u2022 Shows itemized list with categories
+\u2022 You confirm before anything is logged
 
-*Currency prefixes you can use:*
-\u2022 `\u20b9` / `rs` / `inr` / `rupees` \u2192 Indian Rupee
-\u2022 `$` / `usd` / `dollars` \u2192 US Dollar
-\u2022 `\u20ac` / `eur` / `euros` \u2192 Euro
+*You can also ask naturally:*
+\u2022 _"how much did I spend today?"_
+\u2022 _"show my spending this week"_
+\u2022 _"find my netflix expenses"_
+
+*Currency prefixes:*
+\u2022 `\u20b9` / `rs` / `inr` \u2192 Indian Rupee
+\u2022 `$` / `usd` \u2192 US Dollar
+\u2022 `\u20ac` / `eur` \u2192 Euro
 
 *View expenses:*
 \u2022 `today` \u2014 today's expenses
 \u2022 `week` \u2014 this week summary
 \u2022 `month` \u2014 this month summary
 
+*Search:*
+\u2022 `search petrol` \u2014 find by keyword (up to 20 results)
+
 *Reports:*
 \u2022 `report` \u2014 PDF for this month
 \u2022 `report excel` \u2014 Excel (.xlsx) for this month
 \u2022 `report last month` \u2014 previous month PDF
 
-*Search:*
-\u2022 `search petrol` \u2014 find expenses matching a keyword
-\u2022 `search netflix` \u2014 shows up to 20 most recent matches
-
 *Edit & delete:*
-\u2022 `edit last` \u2014 edit your last entry (pick from list if multiple)
+\u2022 `edit last` \u2014 edit your last entry
 \u2022 `delete last` / `undo` \u2014 delete last entry
 
 *Settings:*
-\u2022 `currency INR` \u2014 set default to Rupees
-\u2022 `currency USD` \u2014 set default to Dollars
-\u2022 `currency EUR` \u2014 set default to Euros
-\u2022 `budget 10000` \u2014 set monthly budget (alerts at 50%, 80%, 100%)
+\u2022 `currency INR` / `USD` / `EUR` \u2014 set default currency
+\u2022 `budget 10000` \u2014 monthly budget (alerts at 50%, 80%, 100%)
 \u2022 `budget off` \u2014 remove budget
-\u2022 `notify 9pm` \u2014 daily reminder at 9 PM (your timezone)
-\u2022 `notify 9pm EST` \u2014 set time with timezone
+\u2022 `notify 9pm` \u2014 daily reminder
+\u2022 `notify 9pm EST` \u2014 with timezone
 \u2022 `notify off` \u2014 turn off reminder
-\u2022 `timezone IST` \u2014 set your timezone (IST, EST, SGT\u2026)
+\u2022 `timezone IST` \u2014 set timezone (IST, EST, SGT\u2026)
 
 \u2022 `help` \u2014 show this menu"""
 
@@ -459,7 +460,12 @@ async def _handle_message(phone_number: str, message_text: str, from_voice: bool
                 clear_user_session(phone_number)
                 await send_text(phone_number, "Edit cancelled.")
                 return
-            parsed = parse_expenses(text, user["default_currency"])
+            try:
+                parsed = parse_expenses(text, user["default_currency"])
+            except Exception:
+                logger.exception("parse_expenses failed in awaiting_edit for %s", phone_number)
+                await send_text(phone_number, "Couldn't reach the AI parser right now. Try again in a moment, or send `cancel` to abort.")
+                return
             if parsed:
                 e = parsed[0]
                 update_expense(expense_id, {
@@ -769,10 +775,19 @@ async def _handle_message(phone_number: str, message_text: str, from_voice: bool
 
     # --- Default: parse as expense ---
     is_first = get_last_expense(user["id"]) is None
-    parsed = parse_expenses(text, user["default_currency"], from_voice=from_voice)
+    try:
+        parsed = parse_expenses(text, user["default_currency"], from_voice=from_voice)
+    except Exception:
+        logger.exception("parse_expenses failed for %s", phone_number)
+        await send_text(phone_number, "Couldn't reach the AI parser right now. Please try again in a moment.")
+        return
 
     if not parsed:
-        intent, param = await classify_intent(text)
+        try:
+            intent, param = await classify_intent(text)
+        except Exception:
+            logger.exception("classify_intent failed for %s", phone_number)
+            intent, param = "unknown", None
         _intent_map = {
             "today": "today",
             "week": "week",
